@@ -1,4 +1,8 @@
-//! `microhear <file.wav>`: one CSV row per 32 ms frame, `t_s,level_db`.
+//! `microhear <file.wav>`: one CSV row per 32 ms frame: level, floor, pitch, relative pitch and
+//! loudness, tone scores.
+//!
+//! `microhear events <file.wav>`: the event timeline, one line per event, the thing to compare
+//! when tuning on a recording.
 //!
 //! Takes 16 kHz mono, which is what the duck records:
 //! `arecord -D plughw:aic3104,0 -f S16_LE -r 16000 -c 1 -d 30 clip.wav`
@@ -15,18 +19,22 @@ use std::io::Read;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use microhear_core::{Ear, FRAME, FrameReport, SAMPLE_RATE};
+use microhear_core::{
+    Ear, Event, EventKind, FRAME, FrameReport, Loudness, SAMPLE_RATE, Tone, ToneScores,
+    frame_time_s,
+};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["probe"] => probe(),
-        [path] => wav(path),
-        _ => bail!("usage: microhear <file.wav> | microhear probe"),
+        ["events", path] => events(path),
+        [path] => frames(path),
+        _ => bail!("usage: microhear <file.wav> | microhear events <file.wav> | microhear probe"),
     }
 }
 
-fn wav(path: &str) -> Result<()> {
+fn read_wav(path: &str) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {path}"))?;
     let spec = reader.spec();
     if spec.sample_rate != SAMPLE_RATE || spec.channels != 1 {
@@ -36,7 +44,7 @@ fn wav(path: &str) -> Result<()> {
             spec.channels
         );
     }
-    let samples: Vec<f32> = match spec.sample_format {
+    Ok(match spec.sample_format {
         hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
         hound::SampleFormat::Int => {
             let scale = (1u32 << (spec.bits_per_sample - 1)) as f32;
@@ -45,14 +53,83 @@ fn wav(path: &str) -> Result<()> {
                 .map(|s| s.map(|s| s as f32 / scale))
                 .collect::<Result<_, _>>()?
         }
-    };
+    })
+}
 
-    let mut reports = Vec::new();
-    Ear::new().push(&samples, &mut reports);
-    println!("t_s,level_db");
-    for r in reports {
-        let t = r.index as f64 * FRAME as f64 / SAMPLE_RATE as f64;
-        println!("{t:.3},{:.2}", r.level_db);
+fn hear(path: &str) -> Result<(Vec<FrameReport>, Vec<Event>)> {
+    let samples = read_wav(path)?;
+    let (mut frames, mut events) = (Vec::new(), Vec::new());
+    Ear::new().push(&samples, &mut frames, &mut events);
+    Ok((frames, events))
+}
+
+fn opt(v: Option<f32>) -> String {
+    v.map_or(String::new(), |v| format!("{v:.2}"))
+}
+
+fn frames(path: &str) -> Result<()> {
+    let (frames, _) = hear(path)?;
+    println!(
+        "t_s,level_db,floor_db,over_floor_db,rise_db,voiced,f0_hz,aperiodicity,brightness_hz,rel_pitch_st,rel_loud_db,calm,cutesy,angry"
+    );
+    for r in frames {
+        let tone = |f: fn(&ToneScores) -> f32| opt(r.tone.as_ref().map(f));
+        println!(
+            "{:.3},{:.2},{:.2},{:.2},{:.2},{},{},{},{:.0},{},{},{},{},{}",
+            frame_time_s(r.index),
+            r.level_db,
+            r.floor_db,
+            r.over_floor_db,
+            r.rise_db,
+            r.voiced as u8,
+            opt(r.pitch.map(|p| p.hz)),
+            opt(r.pitch.map(|p| p.aperiodicity)),
+            r.brightness_hz,
+            opt(r.rel_pitch_st),
+            opt(r.rel_loud_db),
+            tone(|t| t.calm),
+            tone(|t| t.cutesy),
+            tone(|t| t.angry),
+        );
+    }
+    Ok(())
+}
+
+fn events(path: &str) -> Result<()> {
+    let (_, events) = hear(path)?;
+    for e in events {
+        let what = match e.kind {
+            EventKind::Onset { over_floor_db } => {
+                format!("onset    {over_floor_db:+.1} dB over floor")
+            }
+            EventKind::Startle {
+                over_floor_db,
+                rise_db,
+            } => format!("startle  {over_floor_db:+.1} dB over floor, {rise_db:+.1} dB rise"),
+            EventKind::UtteranceStart { start } => {
+                format!("voice    from {:.3} s", frame_time_s(start))
+            }
+            EventKind::BaselineSet { hz, level_db } => {
+                format!("baseline {hz:.0} Hz at {level_db:.1} dBFS")
+            }
+            EventKind::UtteranceEnd {
+                start,
+                end,
+                tone,
+                rel_pitch_st,
+                rel_loud_db,
+                loudness,
+            } => format!(
+                "voice    {:.3}–{:.3} s {} {} st {} dB {}",
+                frame_time_s(start),
+                frame_time_s(end),
+                tone.map_or("-", Tone::as_str),
+                rel_pitch_st.map_or("-".into(), |x| format!("{x:+.1}")),
+                rel_loud_db.map_or("-".into(), |x| format!("{x:+.1}")),
+                loudness.map_or("-", Loudness::as_str),
+            ),
+        };
+        println!("{:>8.3} s  #{:<6} {what}", frame_time_s(e.index), e.index);
     }
     Ok(())
 }
@@ -66,6 +143,7 @@ fn probe() -> Result<()> {
     let mut ear = Ear::new();
     let mut samples: Vec<f32> = Vec::with_capacity(buf.len() / 2 + 1);
     let mut reports: Vec<FrameReport> = Vec::new();
+    let mut events: Vec<Event> = Vec::new();
     let mut levels: Vec<f64> = Vec::new();
 
     let mut batch_ms = Vec::new();
@@ -101,8 +179,9 @@ fn probe() -> Result<()> {
         }
 
         reports.clear();
+        events.clear();
         let t = Instant::now();
-        ear.push(&samples, &mut reports);
+        ear.push(&samples, &mut reports, &mut events);
         let spent = t.elapsed();
         ear_time += spent;
         slowest_push = slowest_push.max(spent);

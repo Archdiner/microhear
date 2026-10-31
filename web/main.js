@@ -1,68 +1,377 @@
 import init, { Ear, sample_rate } from "./pkg/microhear_wasm.js";
 
-const button = document.querySelector("#start");
-const readout = document.querySelector("#level");
-const canvas = document.querySelector("#trace");
-const ctx2d = canvas.getContext("2d");
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 // 10 s of 32 ms frames.
 const HISTORY = 312;
-const MIN_DB = -90;
-const levels = [];
+const FRAME_S = 512 / 16000;
+const RULER_ST = 12;
 
-// What is open while listening, so stopping can release the mic and the browser's indicator goes out.
+// The sliders: every one is a parameter of the rust core (crates/microhear-core/src/params.rs).
+const SLIDERS = [
+  ["reflex", "onset_db", "onset over floor", 3, 30, 0.1, "dB", "a sound rising out of the room; soundsentry's 6× is 15.6"],
+  ["reflex", "startle_db", "startle over floor", 6, 50, 0.5, "dB", "how far over the room a startle must be"],
+  ["reflex", "startle_rise_db", "startle suddenness", 3, 40, 0.5, "dB / 64 ms", "how fast it must climb: a clap, not a swell"],
+  ["reflex", "startle_min_dbfs", "startle loud outright", -60, 0, 0.5, "dBFS", "above talking, under a shout or clap"],
+  ["voice", "voiced_db", "voice over floor", 0, 20, 0.5, "dB", "loud enough to look for a pitch"],
+  ["voice", "voiced_aperiodicity", "voice periodicity", 0.05, 0.6, 0.01, "max", "yin: 0 is a pure tone, 1 is noise"],
+  ["voice", "baseline_frames", "baseline learn time", 10, 150, 1, "frames", "voiced frames that set your baseline (47 ≈ 1.5 s)"],
+  ["cutesy", "cute_pitch_st", "raised pitch", 1, 12, 0.25, "st", "semitones over your baseline"],
+  ["cutesy", "cute_spread_st", "sing-song swing", 0.25, 6, 0.25, "st", "pitch spread over the last second"],
+  ["angry", "angry_loud_db", "louder than you", 1, 20, 0.5, "dB", "over your baseline loudness"],
+  ["angry", "angry_min_dbfs", "loud outright", -60, 0, 0.5, "dBFS", "the floor on loudness angry needs"],
+  ["angry", "angry_bright_hz", "brightness", 300, 3000, 25, "Hz", "energy pushed above 1 kHz; tune on your voice"],
+  ["loudness", "loud_db", "loud voice", 1, 20, 0.5, "dB", "over your baseline loudness"],
+  ["loudness", "quiet_db", "quiet voice", -20, -1, 0.5, "dB", "under your baseline loudness"],
+];
+
+let ear = null;
 let session = null;
+const frames = [];
+const spans = []; // utterances: {start, end, tone}
+const log = [];
+let startleUntil = 0;
 
-button.addEventListener("click", () => (session ? stop() : start()));
+const toneColor = (tone) => (tone ? css(`--${tone}`) : css("--floor"));
 
-async function start() {
-  button.disabled = true;
-  await init();
-  const ear = new Ear();
+$("start").addEventListener("click", () => (session ? stop() : start()));
+$("reset").addEventListener("click", () => ear?.reset_speaker());
+$("defaults").addEventListener("click", () => {
+  for (const [, name] of SLIDERS) setParam(name, Ear.defaults(name));
+});
 
-  // The browser's voice processing would rewrite exactly what the ear measures: AGC flattens
-  // loudness relative to the room, and noise suppression eats the floor.
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-  });
+const pet = (on) => {
+  ear?.set_petting(on);
+  $("pet").classList.toggle("held", on);
+};
+$("pet").addEventListener("pointerdown", () => pet(true));
+for (const ev of ["pointerup", "pointerleave"]) $("pet").addEventListener(ev, () => pet(false));
+addEventListener("keydown", (e) => e.key === "p" && !e.repeat && pet(true));
+addEventListener("keyup", (e) => e.key === "p" && pet(false));
+
+
+// Mic and recording go through the same worklet, so a recording is heard exactly as the mic is.
+async function listen(connect, label) {
+  if (session) stop();
+  $("error").textContent = "";
   const audio = new AudioContext({ sampleRate: sample_rate() });
   await audio.audioWorklet.addModule("./worklet.js");
   const tap = new AudioWorkletNode(audio, "tap");
-  audio.createMediaStreamSource(stream).connect(tap);
-
-  tap.port.onmessage = ({ data }) => {
-    for (const db of ear.push(data)) {
-      levels.push(db);
-      if (levels.length > HISTORY) levels.shift();
-    }
-  };
-  session = { stream, audio, ear, frame: requestAnimationFrame(draw) };
-  button.textContent = "stop";
-  button.disabled = false;
+  tap.port.onmessage = ({ data }) => hear(ear.push(data));
+  const release = await connect(audio, tap);
+  session = { audio, release };
+  $("start").textContent = "stop";
+  $("status").textContent = label;
 }
 
+async function start() {
+  $("start").disabled = true;
+  try {
+    // The browser's voice processing would rewrite exactly what the ear measures: AGC flattens
+    // loudness relative to the room, and noise suppression eats the floor.
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
+    await listen((audio, tap) => {
+      audio.createMediaStreamSource(stream).connect(tap);
+      return () => stream.getTracks().forEach((t) => t.stop());
+    }, "listening");
+  } catch (e) {
+    $("error").textContent = `could not start the mic: ${e.message}. firefox cannot open a 16 kHz mic stream; try chrome or safari.`;
+  }
+  $("start").disabled = false;
+}
+
+$("file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  e.target.value = "";
+  await listen(async (audio, tap) => {
+    // Decoded straight to 16 kHz by the context; played to the speakers and the ear at once.
+    const buffer = await audio.decodeAudioData(await file.arrayBuffer());
+    const src = new AudioBufferSourceNode(audio, { buffer });
+    src.connect(tap);
+    src.connect(audio.destination);
+    src.onended = () => session && stop();
+    src.start();
+    return () => src.stop();
+  }, `playing ${file.name}`);
+});
+
 function stop() {
-  const { stream, audio, ear, frame } = session;
+  const { audio, release } = session;
   session = null;
-  cancelAnimationFrame(frame);
-  stream.getTracks().forEach((t) => t.stop());
+  release();
   audio.close();
-  ear.free();
-  button.textContent = "start mic";
+  $("start").textContent = "start mic";
+  $("status").textContent = "mic off";
+}
+
+function hear(json) {
+  const { frames: batch, events } = JSON.parse(json);
+  for (const f of batch) {
+    frames.push(f);
+    if (frames.length > HISTORY) frames.shift();
+  }
+  for (const e of events) {
+    if (e.kind === "voiceStart") spans.push({ start: e.start, end: null, tone: null });
+    if (e.kind === "voiceEnd") {
+      const s = spans.findLast((s) => s.start === e.start);
+      if (s) Object.assign(s, { end: e.end, tone: e.tone });
+      renderLastVoice(e);
+    }
+    if (e.kind === "startle") startleUntil = performance.now() + 700;
+    log.unshift(e);
+  }
+  log.length = Math.min(log.length, 60);
+  if (events.length) renderLog();
+  if (batch.length) renderNow(batch.at(-1));
+}
+
+function setParam(name, value) {
+  ear.set(name, value);
+  const input = $(`p-${name}`);
+  input.value = value;
+  $(`v-${name}`).textContent = fmt(value);
+  if (name === "cute_pitch_st") buildRuler();
+}
+
+const fmt = (v) => (Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
+
+function buildSliders() {
+  const root = $("sliders");
+  let group = null;
+  for (const [g, name, label, min, max, step, unit, help] of SLIDERS) {
+    if (g !== group) {
+      group = g;
+      root.insertAdjacentHTML("beforeend", `<div class="group" style="color:${g in { cutesy: 1, angry: 1 } ? `var(--${g})` : "inherit"}">${g}</div>`);
+    }
+    root.insertAdjacentHTML(
+      "beforeend",
+      `<div class="slider"><label><span>${label}</span><span><b id="v-${name}"></b> ${unit}</span></label>
+       <input type="range" id="p-${name}" min="${min}" max="${max}" step="${step}">
+       <small>${help} · default ${fmt(Ear.defaults(name))}</small></div>`,
+    );
+    $(`p-${name}`).addEventListener("input", (e) => setParam(name, Number(e.target.value)));
+    setParam(name, ear.get(name));
+  }
+}
+
+function buildRuler() {
+  const cute = ear.get("cute_pitch_st");
+  const at = (st) => `${((st + RULER_ST) / (2 * RULER_ST)) * 100}%`;
+  const width = (a, b) => `${((b - a) / (2 * RULER_ST)) * 100}%`;
+  $("ruler").innerHTML = `
+    <div class="zone" style="left:0;width:${width(-RULER_ST, -cute)};background:var(--quiet);opacity:.25"></div>
+    <div class="zone" style="left:${at(-cute)};width:${width(-cute, cute)};background:var(--calm);opacity:.35"></div>
+    <div class="zone" style="left:${at(cute)};width:${width(cute, RULER_ST)};background:var(--cutesy);opacity:.4"></div>
+    <div class="center" style="left:50%"></div>
+    ${[-12, -6, 0, cute, 12].map((st) => `<div class="tick" style="left:${at(st)}">${st > 0 ? "+" : ""}${+st.toFixed(2)}</div>`).join("")}
+    <div class="needle" id="needle" style="left:50%;opacity:0"></div>`;
+}
+
+// The verdict on the last whole utterance stays up after it ends, where the live bars go blank.
+function renderLastVoice(e) {
+  const el = $("last-voice");
+  const rel = e.relPitch === null ? "before a baseline" : `${e.relPitch >= 0 ? "+" : ""}${e.relPitch.toFixed(1)} st · ${e.relLoud >= 0 ? "+" : ""}${e.relLoud.toFixed(1)} dB · ${e.loudness}`;
+  el.innerHTML = `last voice: <b style="color:${toneColor(e.tone)}">${e.tone ?? "voice"}</b> <span style="color:var(--muted)">${rel}</span>`;
+}
+
+function renderNow(f) {
+  $("now-level").textContent = `${f.level.toFixed(1)} dBFS`;
+  $("now-over").textContent = `${f.over >= 0 ? "+" : ""}${f.over.toFixed(1)} dB over floor`;
+  $("now-pitch").textContent = f.voiced ? `${f.hz.toFixed(0)} Hz` : "no pitch";
+  const loud = $("now-loud");
+  loud.textContent = f.loudness ? `${f.loudness} voice` : "loudness –";
+  loud.style.background = f.loudness === "loud" ? css("--angry") : f.loudness === "quiet" ? css("--quiet") : "";
+  loud.style.color = f.loudness && f.loudness !== "normal" ? "#fff" : "";
+
+  const hz = ear.baseline_hz();
+  const set = Number.isFinite(hz);
+  $("baseline").classList.toggle("learning", !set);
+  const needed = ear.get("baseline_frames");
+  $("baseline-progress").style.width = `${set ? 100 : (100 * ear.learned()) / needed}%`;
+  if (set) {
+    $("baseline-value").innerHTML = `<span style="color:var(--calm)">${hz.toFixed(0)} Hz</span> · ${ear.baseline_db().toFixed(1)} dBFS`;
+    $("baseline-note").textContent = `your neutral pitch and loudness. cutesy starts at ${(hz * 2 ** (ear.get("cute_pitch_st") / 12)).toFixed(0)} Hz.`;
+  } else {
+    $("baseline-value").textContent = f.petting ? "petting: not listening" : "learning…";
+    $("baseline-note").textContent = `speak normally: ${ear.learned()} of ${needed} voiced frames heard.`;
+  }
+
+  const needle = $("needle");
+  if (needle) {
+    const show = f.relPitch !== null;
+    needle.style.opacity = show ? 1 : 0;
+    if (show) {
+      const st = Math.max(-RULER_ST, Math.min(RULER_ST, f.relPitch));
+      needle.style.left = `${((st + RULER_ST) / (2 * RULER_ST)) * 100}%`;
+      needle.style.background = toneColor(f.tone);
+    }
+  }
+
+  for (const t of ["calm", "cutesy", "angry"]) {
+    const el = $(`tone-${t}`);
+    el.classList.toggle("on", f.tone === t);
+    el.querySelector(".bar").style.width = `${(f[t] ?? 0) * 100}%`;
+    $(`${t}-v`).textContent = f[t] === null ? "–" : f[t].toFixed(2);
+  }
+  $("status").textContent = f.petting ? "petting · muted" : session ? "listening" : "mic off";
+}
+
+function renderLog() {
+  const t = (i) => (i * FRAME_S).toFixed(2);
+  const rows = log.map((e) => {
+    switch (e.kind) {
+      case "onset":
+        return [css("--muted"), "onset", `+${e.over.toFixed(1)} dB over the room`];
+      case "startle":
+        return [css("--startle"), "startle", `+${e.over.toFixed(1)} dB over the room, climbed ${e.rise.toFixed(1)} dB in 64 ms`];
+      case "voiceStart":
+        return [css("--fg"), "voice", `began ${t(e.start)} s, sure of it ${((e.i - e.start + 1) * FRAME_S * 1000).toFixed(0)} ms in`];
+      case "baseline":
+        return [css("--calm"), "baseline", `${e.hz.toFixed(0)} Hz at ${e.level.toFixed(1)} dBFS`];
+      case "voiceEnd": {
+        const rel = e.relPitch === null ? "" : `${e.relPitch >= 0 ? "+" : ""}${e.relPitch.toFixed(1)} st, ${e.relLoud >= 0 ? "+" : ""}${e.relLoud.toFixed(1)} dB, ${e.loudness}`;
+        return [toneColor(e.tone), e.tone ?? "voice", `${t(e.start)}–${t(e.end)} s ${rel} · known ${((e.i - e.end + 1) * FRAME_S * 1000).toFixed(0)} ms after`];
+      }
+    }
+  });
+  $("log").innerHTML = rows
+    .map(([color, tag, text], n) => `<div><span style="color:var(--muted)">${t(log[n].i)} s #${log[n].i}</span> <span class="tag" style="color:${color}">${tag}</span> ${text}</div>`)
+    .join("");
+}
+
+function fit(canvas) {
+  const ratio = devicePixelRatio || 1;
+  const w = Math.round(canvas.clientWidth * ratio);
+  const h = Math.round(Number(canvas.getAttribute("height")) * ratio);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+    canvas.style.height = `${canvas.getAttribute("height")}px`;
+  }
+  return [canvas.getContext("2d"), w, h, ratio];
 }
 
 function draw() {
-  const { width, height } = canvas;
-  ctx2d.clearRect(0, 0, width, height);
-  ctx2d.strokeStyle = getComputedStyle(canvas).color;
-  ctx2d.beginPath();
-  levels.forEach((db, i) => {
-    const x = (i / (HISTORY - 1)) * width;
-    const y = height * Math.min(1, Math.max(0, db / MIN_DB));
-    i ? ctx2d.lineTo(x, y) : ctx2d.moveTo(x, y);
-  });
-  ctx2d.stroke();
-  const last = levels.at(-1);
-  if (last !== undefined) readout.textContent = `${last.toFixed(1)} dBFS`;
-  if (session) session.frame = requestAnimationFrame(draw);
+  if (performance.now() > startleUntil) $("startle").classList.remove("on");
+  else $("startle").classList.add("on");
+  $("mem").textContent = `ear ≈ 6 KB (64 ms raw + 1 s features) · page history ${frames.length} frames`;
+  if (frames.length) {
+    const last = frames.at(-1).i;
+    const x = (i, w) => ((i - (last - HISTORY + 1)) / (HISTORY - 1)) * w;
+    drawLevel(last, x);
+    drawPitch(last, x);
+  }
+  requestAnimationFrame(draw);
 }
+
+function shade(ctx, w, h, last, x) {
+  for (const s of spans) {
+    const end = s.end ?? last + 1;
+    if (end < last - HISTORY) continue;
+    ctx.fillStyle = toneColor(s.tone);
+    ctx.globalAlpha = s.tone ? 0.14 : 0.07;
+    ctx.fillRect(x(s.start, w), 0, x(end, w) - x(s.start, w), h);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function line(ctx, pts, color, width, dash = []) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.setLineDash(dash);
+  ctx.beginPath();
+  let pen = false;
+  for (const [px, py] of pts) {
+    if (py === null) {
+      pen = false;
+      continue;
+    }
+    pen ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    pen = true;
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawLevel(last, x) {
+  const [ctx, w, h, r] = fit($("level"));
+  const TOP = 0, BOTTOM = -90;
+  const y = (db) => ((TOP - Math.max(BOTTOM, Math.min(TOP, db))) / (TOP - BOTTOM)) * h;
+  ctx.clearRect(0, 0, w, h);
+  shade(ctx, w, h, last, x);
+
+  ctx.fillStyle = css("--muted");
+  ctx.font = `${11 * r}px ui-monospace, monospace`;
+  for (const db of [0, -20, -40, -60, -80]) {
+    ctx.fillRect(0, y(db), w, r * 0.5);
+    ctx.fillText(`${db} dBFS`, 4 * r, y(db) + 12 * r);
+  }
+  const onset = ear.get("onset_db"), startle = ear.get("startle_db");
+  line(ctx, frames.map((f) => [x(f.i, w), y(f.floor + onset)]), css("--muted"), 1 * r, [4 * r, 4 * r]);
+  line(ctx, frames.map((f) => [x(f.i, w), y(Math.max(f.floor + startle, ear.get("startle_min_dbfs")))]), css("--startle"), 1.5 * r, [6 * r, 4 * r]);
+  line(ctx, frames.map((f) => [x(f.i, w), y(f.floor)]), css("--floor"), 2 * r);
+
+  const base = ear.baseline_db();
+  if (Number.isFinite(base)) {
+    line(ctx, [[0, y(base)], [w, y(base)]], css("--calm"), 2 * r, [2 * r, 3 * r]);
+    const angry = Math.max(base + ear.get("angry_loud_db"), ear.get("angry_min_dbfs"));
+    line(ctx, [[0, y(angry)], [w, y(angry)]], css("--angry"), 1.5 * r, [2 * r, 3 * r]);
+  }
+
+  line(ctx, frames.map((f) => [x(f.i, w), y(f.level)]), css("--fg"), 1.5 * r);
+  for (const e of log) {
+    if (e.kind !== "startle" || e.i < last - HISTORY) continue;
+    ctx.fillStyle = css("--startle");
+    ctx.fillRect(x(e.i, w) - 1.5 * r, 0, 3 * r, h);
+  }
+}
+
+function drawPitch(last, x) {
+  const [ctx, w, h, r] = fit($("pitch"));
+  const LO = 60, HI = 900;
+  const y = (hz) => h - (Math.log(hz / LO) / Math.log(HI / LO)) * h;
+  ctx.clearRect(0, 0, w, h);
+  shade(ctx, w, h, last, x);
+
+  ctx.fillStyle = css("--muted");
+  ctx.font = `${11 * r}px ui-monospace, monospace`;
+  for (const hz of [100, 200, 400, 800]) {
+    ctx.fillRect(0, y(hz), w, r * 0.5);
+    ctx.fillText(`${hz} Hz`, 4 * r, y(hz) - 4 * r);
+  }
+
+  const base = ear.baseline_hz();
+  if (Number.isFinite(base)) {
+    const cute = base * 2 ** (ear.get("cute_pitch_st") / 12);
+    ctx.fillStyle = css("--cutesy");
+    ctx.globalAlpha = 0.08;
+    ctx.fillRect(0, 0, w, y(cute));
+    ctx.globalAlpha = 1;
+    line(ctx, [[0, y(cute)], [w, y(cute)]], css("--cutesy"), 1.5 * r, [6 * r, 4 * r]);
+    line(ctx, [[0, y(base)], [w, y(base)]], css("--calm"), 3 * r);
+    ctx.fillStyle = css("--calm");
+    ctx.font = `bold ${13 * r}px ui-monospace, monospace`;
+    ctx.fillText(`your baseline ${base.toFixed(0)} Hz`, w - 210 * r, y(base) - 6 * r);
+    ctx.fillStyle = css("--cutesy");
+    ctx.fillText(`cutesy ≥ ${cute.toFixed(0)} Hz`, w - 210 * r, y(cute) - 6 * r);
+  }
+
+  for (const f of frames) {
+    if (!f.voiced) continue;
+    ctx.fillStyle = toneColor(f.tone);
+    ctx.beginPath();
+    ctx.arc(x(f.i, w), y(f.hz), 3.2 * r, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+}
+
+// Last, so every function and constant above exists before the first frame is drawn.
+await init();
+ear = new Ear();
+buildSliders();
+buildRuler();
+requestAnimationFrame(draw);

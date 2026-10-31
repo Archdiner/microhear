@@ -4,28 +4,200 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>microhear</title>
+    <link rel="icon" href="data:," />
     <style>
-      :root { --bg: #fafaf7; --fg: #1d1d1b; --muted: #77756f; }
-      @media (prefers-color-scheme: dark) { :root { --bg: #141413; --fg: #ecebe6; --muted: #8f8d86; } }
-      body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 15px/1.5 ui-monospace, monospace; }
-      main { max-width: 720px; margin: 0 auto; }
-      p { color: var(--muted); }
-      canvas { width: 100%; height: 200px; color: var(--fg); border-bottom: 1px solid var(--muted); }
-      button { font: inherit; padding: 6px 14px; }
+      :root {
+        --bg: #fafaf7; --panel: #f1f0ea; --fg: #1d1d1b; --muted: #77756f; --line: #d9d7cf;
+        --calm: #1f8a7e; --cutesy: #d94f8a; --angry: #e0521f; --startle: #d99a00;
+        --quiet: #4a78c9; --floor: #9a978e;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #141413; --panel: #1e1e1c; --fg: #ecebe6; --muted: #8f8d86; --line: #34332f;
+          --calm: #3cc2b1; --cutesy: #f27bb0; --angry: #ff7a45; --startle: #ffc533;
+          --quiet: #7ba3ef; --floor: #75736c;
+        }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 24px 16px 64px; background: var(--bg); color: var(--fg);
+        font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      main { max-width: 980px; margin: 0 auto; }
+      h1 { margin: 0 0 4px; font-size: 28px; }
+      h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+        margin: 36px 0 10px; }
+      p { color: var(--muted); margin: 6px 0; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 14px 0; }
+      button { font: inherit; padding: 7px 14px; border: 1px solid var(--line); border-radius: 6px;
+        background: var(--panel); color: var(--fg); cursor: pointer; }
+      button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+      button.held { background: var(--cutesy); color: #fff; border-color: var(--cutesy); }
+      .panel { background: var(--panel); border-radius: 10px; padding: 16px; }
+      .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+      .big { font-size: 30px; font-weight: 700; line-height: 1.2; }
+      .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+
+      /* the baseline, front and centre */
+      #baseline { border-left: 6px solid var(--calm); }
+      #baseline.learning { border-left-color: var(--floor); }
+      .progress { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin: 8px 0; }
+      .progress > div { height: 100%; width: 0; background: var(--calm); transition: width .1s; }
+      .ruler { position: relative; height: 54px; margin-top: 12px; }
+      .ruler .zone { position: absolute; top: 14px; height: 18px; }
+      .ruler .tick { position: absolute; top: 34px; font-size: 11px; color: var(--muted); transform: translateX(-50%); }
+      .ruler .center { position: absolute; top: 8px; height: 30px; width: 2px; background: var(--fg); transform: translateX(-1px); }
+      .ruler .needle { position: absolute; top: 4px; width: 14px; height: 14px; border-radius: 50%;
+        transform: translateX(-7px); background: var(--fg); border: 2px solid var(--bg); transition: left .06s; }
+
+      .tones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+      .tone { border-radius: 8px; padding: 10px; border: 2px solid transparent; opacity: .45; transition: opacity .15s; }
+      .tone.on { opacity: 1; border-color: currentColor; }
+      .tone .bar { height: 6px; border-radius: 3px; background: currentColor; width: 0; margin-top: 6px; }
+      .tone.calm { color: var(--calm); } .tone.cutesy { color: var(--cutesy); } .tone.angry { color: var(--angry); }
+      .tone b { font-size: 18px; }
+
+      #startle { color: var(--startle); font-weight: 700; opacity: 0; transition: opacity .4s; }
+      #startle.on { opacity: 1; transition: none; }
+      .chip { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 13px; background: var(--line); }
+
+      canvas { width: 100%; display: block; }
+      .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+      .legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 4px; }
+
+      #log { max-height: 260px; overflow-y: auto; font-size: 13px; }
+      #log div { padding: 3px 0; border-bottom: 1px solid var(--line); }
+      .tag { display: inline-block; min-width: 76px; font-weight: 700; }
+
+      .sliders { display: grid; gap: 4px 22px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+      .slider { padding: 6px 0; }
+      .slider label { display: flex; justify-content: space-between; font-size: 13px; }
+      .slider input { width: 100%; accent-color: var(--calm); }
+      .slider small { color: var(--muted); display: block; font-size: 11px; line-height: 1.35; }
+      .group { grid-column: 1 / -1; margin-top: 10px; font-weight: 700; }
+
+      .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; font-size: 12px; }
+      .flow .box { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; flex: 1 1 120px; }
+      .flow .box b { display: block; font-size: 13px; }
+      .flow .arrow { align-self: center; color: var(--muted); }
+      .flow .ram { border-color: var(--calm); }
+      table { border-collapse: collapse; width: 100%; font-size: 13px; }
+      td, th { text-align: left; padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+      a { color: inherit; }
     </style>
   </head>
   <body>
     <main>
       <h1>microhear</h1>
-      <p>how the duck hears. level per 32 ms frame, last 10 s.</p>
-      <p>
-        the line is loudness, newest on the right. top is 0 dBFS, the loudest a mic can record;
-        bottom is −90 dBFS, near silence. so every reading is negative, and a quiet room sits low.
-        nothing is recorded or sent anywhere: samples live in memory and are gone when you stop.
-      </p>
-      <button id="start">start mic</button>
-      <span id="level"></span>
-      <canvas id="trace" width="1440" height="400"></canvas>
+      <p>how the duck hears. one voice, relative to itself: its own neutral pitch and loudness is the
+        baseline, and calm, cutesy and angry are read against it.</p>
+
+      <div class="row">
+        <button id="start" class="primary">start mic</button>
+        <button id="pet" title="or hold P">hold to pet</button>
+        <label class="chip" style="cursor:pointer">play a recording <input id="file" type="file" accept="audio/*" hidden></label>
+        <button id="reset">relearn my baseline</button>
+        <span id="startle">⚡ STARTLE</span>
+        <span id="status" class="chip">mic off</span>
+      </div>
+      <p id="error" style="color: var(--angry)"></p>
+
+      <div class="grid">
+        <section id="baseline" class="panel learning">
+          <div class="label">your baseline</div>
+          <div class="big" id="baseline-value">not learned yet</div>
+          <div id="baseline-note">speak normally for 1.5 s: the first voiced frames set it.</div>
+          <div class="progress"><div id="baseline-progress"></div></div>
+          <div class="label" style="margin-top:10px">your pitch now, in semitones from it</div>
+          <div class="ruler" id="ruler"></div>
+        </section>
+
+        <section class="panel">
+          <div class="label">tone, over the last second of voice</div>
+          <div class="tones" style="margin-top:8px">
+            <div class="tone calm" id="tone-calm"><b>calm</b><div id="calm-v">–</div><div class="bar"></div></div>
+            <div class="tone cutesy" id="tone-cutesy"><b>cutesy</b><div id="cutesy-v">–</div><div class="bar"></div></div>
+            <div class="tone angry" id="tone-angry"><b>angry</b><div id="angry-v">–</div><div class="bar"></div></div>
+          </div>
+          <div id="last-voice" style="margin-top:10px">last voice: –</div>
+          <div class="row" style="margin-bottom:0">
+            <span class="chip" id="now-level">– dBFS</span>
+            <span class="chip" id="now-over">– over floor</span>
+            <span class="chip" id="now-pitch">no pitch</span>
+            <span class="chip" id="now-loud">loudness –</span>
+          </div>
+        </section>
+      </div>
+
+      <h2>loudness · last 10 s</h2>
+      <div class="panel">
+        <canvas id="level" height="220"></canvas>
+        <div class="legend">
+          <span><i style="background:var(--fg)"></i>level</span>
+          <span><i style="background:var(--floor)"></i>room floor (soundsentry's)</span>
+          <span><i style="background:var(--muted);opacity:.6"></i>onset = floor + onset_db</span>
+          <span><i style="background:var(--startle)"></i>startle = floor + startle_db</span>
+          <span><i style="background:var(--calm)"></i>your baseline loudness</span>
+          <span><i style="background:var(--angry)"></i>angry needs ≥ this loud</span>
+          <span>shading: an utterance, coloured by its tone</span>
+        </div>
+      </div>
+
+      <h2>pitch · last 10 s</h2>
+      <div class="panel">
+        <canvas id="pitch" height="240"></canvas>
+        <div class="legend">
+          <span><i style="background:var(--calm)"></i>your baseline pitch</span>
+          <span><i style="background:var(--cutesy)"></i>cutesy starts here (baseline + cute_pitch_st)</span>
+          <span>dots: voiced frames, coloured by the tone of that moment (grey until a baseline exists)</span>
+        </div>
+      </div>
+
+      <h2>events · what the brain tick would be handed</h2>
+      <div class="panel"><div id="log"><p>events appear here, newest first, with the frame they were known on.</p></div></div>
+
+      <h2>tune it live</h2>
+      <p>every slider moves the same number the rust core decides with; the duck and this page share the code.</p>
+      <div class="panel"><div class="sliders" id="sliders"></div>
+        <div class="row"><button id="defaults">back to defaults</button></div></div>
+
+      <h2>where the sound goes</h2>
+      <div class="panel">
+        <div class="label">on the duck</div>
+        <div class="flow" style="margin:8px 0 14px">
+          <div class="box"><b>mic → codec</b>tlv320aic3104: pga +30 dB, adc, optional high-pass</div><span class="arrow">►</span>
+          <div class="box"><b>i²s → dma</b>rk3566 copies samples into an alsa ring buffer in ram</div><span class="arrow">►</span>
+          <div class="box"><b>arecord → pipe</b>16 kHz s16, ~128 ms batches, kernel pipe buffer</div><span class="arrow">►</span>
+          <div class="box"><b>robotd pump()</b>one reader: petting cnn, soundsentry (floor), microhear</div><span class="arrow">►</span>
+          <div class="box ram"><b>ear state ≈ 6 KB</b>64 ms raw for pitch, 1 s of features for tone, baseline</div><span class="arrow">►</span>
+          <div class="box"><b>events</b>onset, startle, voice + tone → brain tick (50 Hz)</div>
+        </div>
+        <div class="label">in this page</div>
+        <div class="flow" style="margin:8px 0 14px">
+          <div class="box"><b>mic</b>browser processing off: no agc, no noise suppression</div><span class="arrow">►</span>
+          <div class="box"><b>audio worklet</b>128-sample (8 ms) blocks at 16 kHz</div><span class="arrow">►</span>
+          <div class="box"><b>wasm ear</b>the same rust core, compiled to wasm</div><span class="arrow">►</span>
+          <div class="box ram"><b>memory now</b><span id="mem">–</span></div>
+        </div>
+        <p>nothing touches disk on either side. raw audio is kept for exactly two frames (64 ms), as long
+          as pitch needs, and then overwritten. what survives is features (a few numbers per 32 ms) and
+          events. nothing is recorded or sent anywhere from this page.</p>
+      </div>
+
+      <h2>what the cues are</h2>
+      <div class="panel">
+        <table>
+          <tr><th>reads as</th><th>cue</th><th>why</th></tr>
+          <tr><td style="color:var(--startle)">startle</td><td>≥ startle_db over the floor, climbed ≥ startle_rise_db within 64 ms, and loud outright</td>
+            <td>the mammal startle reflex is a brainstem shortcut (≈ 6–12 ms in cats), decided before any listening. it fires on the frame, not after the sound.</td></tr>
+          <tr><td>onset</td><td>rises ≥ onset_db (soundsentry's 6×) out of the room</td><td>the cue to turn toward a sound. the duck has one mic, so turning is done by sweeping the head and following the loudness.</td></tr>
+          <tr><td style="color:var(--calm)">calm</td><td>near your baseline in pitch and loudness</td><td>your neutral voice, learned from the first 1.5 s you speak, then followed slowly from calm speech only.</td></tr>
+          <tr><td style="color:var(--cutesy)">cutesy</td><td>pitch ≥ cute_pitch_st over baseline, swinging sing-song, not shouting</td>
+            <td>pet- and infant-directed speech raise mean pitch and widen its range; pet-directed matches infant-directed in pitch (burnham et al. 2002).</td></tr>
+          <tr><td style="color:var(--angry)">angry</td><td>≥ angry_loud_db over your loudness, ≥ angry_min_dbfs outright, bright (energy above 1 kHz)</td>
+            <td>hot anger is louder, higher-pitched and pushes energy above 1 kHz (banse & scherer 1996). both anger and cuteness raise pitch, so loudness is what separates them.</td></tr>
+          <tr><td style="color:var(--quiet)">quiet / loud</td><td>loudness ± loud_db / quiet_db from your baseline</td><td>relative, so it works at any distance from the mic once the baseline is set.</td></tr>
+        </table>
+        <p>petting mutes everything (and ~1 s after): on the duck the mic is almost a contact mic, and a scratch is the loudest thing it hears.</p>
+      </div>
     </main>
     <script type="module" src="./main.js"></script>
   </body>
