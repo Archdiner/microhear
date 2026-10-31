@@ -252,9 +252,16 @@ function renderTakes() {
 
 // The raw 16 kHz samples between start and stop become one wav, uploaded under its label. A bad
 // take is deleted from the store with its delete button.
+// Under half a second is a double-click or a mic that never started, not a take.
+const MIN_TAKE_SAMPLES = 8000;
+
 function finishRecording(label) {
-  if (!recording?.length) return (recording = null);
-  const n = recording.reduce((a, b) => a + b.length, 0);
+  const n = (recording ?? []).reduce((a, b) => a + b.length, 0);
+  if (n < MIN_TAKE_SAMPLES) {
+    recording = null;
+    if (label !== "unlabelled") $("error").textContent = `that ${label} take had no audio (under 0.5 s), so it was not kept.`;
+    return;
+  }
   const wav = new DataView(new ArrayBuffer(44 + 2 * n));
   const text = (at, s) => [...s].forEach((c, i) => wav.setUint8(at + i, c.charCodeAt(0)));
   text(0, "RIFF"); wav.setUint32(4, 36 + 2 * n, true); text(8, "WAVEfmt ");
