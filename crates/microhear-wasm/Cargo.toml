@@ -1,0 +1,14 @@
+# The browser binding: the web page's mic feeds microhear-core through this.
+[package]
+name = "microhear-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+microhear-core = { path = "../microhear-core" }
+# Pinned: the wasm-bindgen CLI that generates the JS glue must be this exact version.
+wasm-bindgen = "=0.2.100"

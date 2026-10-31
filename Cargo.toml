@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/microhear-core",
+  "crates/microhear-wasm",
+  "crates/microhear-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Archdiner/microhear"
+
+[profile.release]
+opt-level = 3
+lto = true

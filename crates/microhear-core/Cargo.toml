@@ -1,0 +1,9 @@
+# The ear, written once: pure DSP over 16 kHz mono f32, no dependencies, so the same code runs
+# in the browser (microhear-wasm), on recordings (microhear-cli) and inside microduck's mic worker.
+[package]
+name = "microhear-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

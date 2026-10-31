@@ -1,0 +1,15 @@
+# Recordings in, frame-by-frame numbers out: where thresholds get tuned against real audio.
+[package]
+name = "microhear-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "microhear"
+path = "src/main.rs"
+
+[dependencies]
+microhear-core = { path = "../microhear-core" }
+anyhow = "1"
+hound = "3.5"
