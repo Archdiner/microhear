@@ -30,6 +30,12 @@ loudest thing it hears. microduck's `SoundSentry` mutes sound events while the p
 says petting, plus ~1 s after. whatever microhear emits on the duck must honour the same mute, or
 every pet reads as a startle.
 
+**other ducks.** ducks hear each other over bluetooth, not the mic: the conductor's beat counter
+rides in its ble advertisement and the rest scan for it (`sounds::chorale::beat`, `btd`). microhear
+never touches that path, and nothing it runs may take cpu from it. what it must not do is mistake a
+peer's singing, or its own, for a person: like the petting mute, hearing should go quiet for tone
+and startle while the chorale plays (robotd knows when it does).
+
 **one floor.** the room floor belongs to `SoundSentry`, which already adapts it (EMA, τ ≈ 6 s,
 outside events, absorbing anything loud for 3 s+). L1 reads that floor; it does not keep a second
 one that could drift from it. **open question:** that floor learns talking. speech under 6× the
@@ -47,6 +53,8 @@ microduck main has today, for comparison.
   which in acoustics is a flatter spectral tilt and a lower H1–H2. the open design question is the
   representation (the "codec") the duck hears tone through, and whether rules or a deliberately
   tiny model, trained on one person's labelled clips, reads it.
+- **self and peer audio.** mute tone and startle while this duck or the chorale is making sound;
+  `duck-sim` already runs several singing ducks over pulseaudio, the place to test it.
 - **persistence.** the baseline lives in memory and is gone on restart. the duck should remember its
   person's voice: worth a few bytes on disk, once there is a reason to trust what it learned.
 - **orient like a single-eared animal.** the duck has one wired mic, so no time difference between
