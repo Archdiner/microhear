@@ -44,6 +44,17 @@ let startleUntil = 0;
 const toneColor = (tone) => (tone ? css(`--${tone}`) : css("--floor"));
 
 $("start").addEventListener("click", () => (session ? stop() : start()));
+$("takes").addEventListener("click", (e) => {
+  const button = e.target.closest("button[data-label]");
+  if (!button) return;
+  const label = button.dataset.label;
+  if (session?.label === label) stop();
+  else start(label);
+});
+$("clips").addEventListener("click", (e) => {
+  const button = e.target.closest("button[data-delete]");
+  if (button) deleteClip(clips[Number(button.dataset.delete)]);
+});
 $("reset").addEventListener("click", () => ear?.reset_speaker());
 $("defaults").addEventListener("click", () => {
   for (const [, name] of SLIDERS) setParam(name, Ear.defaults(name));
@@ -73,7 +84,7 @@ async function listen(connect, label) {
   $("status").textContent = label;
 }
 
-async function start() {
+async function start(label = "unlabelled") {
   $("start").disabled = true;
   try {
     // The browser's voice processing would rewrite exactly what the ear measures: AGC flattens
@@ -84,8 +95,11 @@ async function start() {
     await listen((audio, tap) => {
       audio.createMediaStreamSource(stream).connect(tap);
       return () => stream.getTracks().forEach((t) => t.stop());
-    }, "listening");
-    startRecording();
+    }, label === "unlabelled" ? "listening" : `recording ${label}`);
+    session.label = label;
+    session.began = performance.now();
+    recording = [];
+    renderTakes();
   } catch (e) {
     $("error").textContent = `could not start the mic: ${e.message}. firefox cannot open a 16 kHz mic stream; try chrome or safari.`;
   }
@@ -139,11 +153,12 @@ function push(samples) {
 }
 
 function stop() {
-  const { audio, release } = session;
+  const { audio, release, label } = session;
   session = null;
   release();
   audio.close();
-  finishRecording();
+  finishRecording(label);
+  renderTakes();
   $("start").textContent = "start mic";
   $("status").textContent = "mic off";
 }
@@ -213,12 +228,31 @@ function buildRuler() {
     <div class="needle" id="needle" style="left:50%;opacity:0"></div>`;
 }
 
-// Recording: the raw 16 kHz samples between start and stop, labelled, as a wav you download.
-// Nothing leaves the page; the clips are for `microhear check` and, later, a test set.
-function startRecording() {
-  recording = $("record").checked ? [] : null;
+// What can be recorded on purpose, each one button. Calm is first because cutesy and angry are
+// heard relative to it; the noises are scored by whether they startle.
+const TAKES = [
+  ["calm", "your normal voice; record first, it sets the baseline"],
+  ["cutesy", "the voice you would use on a pet"],
+  ["angry", "stern, clenched, telling off"],
+  ["clap", "single claps, a second or two apart"],
+  ["snap", "finger snaps, a second or two apart"],
+];
+const takeColor = (label) => (["calm", "cutesy", "angry"].includes(label) ? `var(--${label})` : "var(--startle)");
+let counts = {};
+
+function renderTakes() {
+  $("takes").innerHTML = TAKES.map(([label, hint]) => {
+    const live = session?.label === label;
+    const n = counts[label] ?? 0;
+    return `<button data-label="${label}" class="take${live ? " live" : ""}" style="--c:${takeColor(label)}">
+      <b>${live ? "■ stop" : "● record"} ${label}</b><span class="secs" data-secs="${label}"></span>
+      <small>${hint}</small><small class="count${n >= GOAL ? " done" : ""}">${n}/${GOAL} kept</small></button>`;
+  }).join("");
 }
-function finishRecording() {
+
+// The raw 16 kHz samples between start and stop become one wav, uploaded under its label. A bad
+// take is deleted from the store with its delete button.
+function finishRecording(label) {
   if (!recording?.length) return (recording = null);
   const n = recording.reduce((a, b) => a + b.length, 0);
   const wav = new DataView(new ArrayBuffer(44 + 2 * n));
@@ -234,16 +268,19 @@ function finishRecording() {
       at += 2;
     }
   recording = null;
-  const label = $("label").value;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const name = `microhear-${label}-${stamp}.wav`;
   const blob = new Blob([wav], { type: "audio/wav" });
-  const clip = { name, label, seconds: n / 16000, url: URL.createObjectURL(blob), status: "uploading…" };
+  const clip = { name: `microhear-${label}-${stamp}.wav`, label, seconds: n / 16000, url: URL.createObjectURL(blob), status: "uploading…" };
   clips.unshift(clip);
   renderClips();
   fetch(`${COLLECT}?label=${label}`, { method: "POST", headers: { "content-type": "audio/wav" }, body: blob })
-    .then(async (r) => (r.ok ? "uploaded ✓" : `not uploaded: ${(await r.json().catch(() => ({}))).error ?? r.status}`))
-    .catch(() => "not uploaded: offline?")
+    .then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) return `not kept: ${body.error ?? r.status}`;
+      clip.pathname = body.pathname;
+      return "kept ✓";
+    })
+    .catch(() => "not kept: offline?")
     .then((status) => {
       clip.status = status;
       renderClips();
@@ -251,26 +288,38 @@ function finishRecording() {
     });
 }
 
+async function deleteClip(clip) {
+  if (!clip) return;
+  clip.status = "deleting…";
+  renderClips();
+  if (clip.pathname) {
+    const r = await fetch(`${COLLECT}?pathname=${encodeURIComponent(clip.pathname)}`, { method: "DELETE" }).catch(() => null);
+    if (!r?.ok) {
+      clip.status = "could not delete; try again";
+      return renderClips();
+    }
+  }
+  URL.revokeObjectURL(clip.url);
+  clips.splice(clips.indexOf(clip), 1);
+  renderClips();
+  refreshCounts();
+}
+
 async function refreshCounts() {
   try {
-    const counts = await (await fetch(COLLECT, { cache: "no-store" })).json();
-    $("counts").innerHTML = ["calm", "cutesy", "angry", "quiet", "loud", "startle"]
-      .map((l) => {
-        const n = counts[l] ?? 0;
-        const color = ["calm", "cutesy", "angry"].includes(l) ? `var(--${l})` : "inherit";
-        return `<span class="chip" style="margin-right:4px;${n >= GOAL ? `outline:2px solid ${color}` : ""}"><b style="color:${color}">${l}</b> ${n}/${GOAL}</span>`;
-      })
-      .join("");
+    counts = await (await fetch(COLLECT, { cache: "no-store" })).json();
   } catch {
-    $("counts").textContent = "";
+    counts = {};
   }
+  renderTakes();
 }
 
 function renderClips() {
   $("clips").innerHTML = clips
-    .map((c) => `<div><span class="tag" style="color:${toneColor(["calm", "cutesy", "angry"].includes(c.label) ? c.label : null)}">${c.label}</span>
-      ${c.seconds.toFixed(1)} s <audio controls src="${c.url}" style="height:28px;vertical-align:middle"></audio>
-      <a href="${c.url}" download="${c.name}">download</a> <span style="color:var(--muted)">${c.status}</span></div>`)
+    .map((c, i) => `<div class="clip"><span class="tag" style="color:${takeColor(c.label)}">${c.label}</span>
+      ${c.seconds.toFixed(1)} s <audio controls src="${c.url}"></audio>
+      <span style="color:var(--muted)">${c.status}</span>
+      <button data-delete="${i}" title="delete this take from the store">delete</button></div>`)
     .join("");
 }
 
@@ -364,6 +413,10 @@ function fit(canvas) {
 }
 
 function draw() {
+  if (session?.began) {
+    const el = document.querySelector(`[data-secs="${session.label}"]`);
+    if (el) el.textContent = ` ${((performance.now() - session.began) / 1000).toFixed(1)} s`;
+  }
   if (performance.now() > startleUntil) $("startle").classList.remove("on");
   else $("startle").classList.add("on");
   const per = cpu.frames ? cpu.us / cpu.frames : 0;

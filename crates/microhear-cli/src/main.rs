@@ -8,11 +8,12 @@
 //! `arecord -D plughw:aic3104,0 -f S16_LE -r 16000 -c 1 -d 30 clip.wav`
 //!
 //! `microhear check <clips…>`: one person's labelled clips, scored. The label is in the file name
-//! (`calm`, `cutesy`, `angry`, `quiet`, `loud`, `startle`), as the page names its downloads, or
+//! (`calm`, `cutesy`, `angry`, `quiet`, `loud`; `clap`, `snap`, `startle` are scored by whether
+//! they startle), as the page names its downloads, or
 //! the folder, as `collect/pull.mjs` lays them out. Calm
 //! clips go first through one ear, because they are what set the speaker's baseline; every clip
-//! after is heard against it, the way the duck would hear that person. Startles in clips not
-//! labelled `startle` are counted as false alarms.
+//! after is heard against it, the way the duck would hear that person. Startles in voice clips
+//! are counted as false alarms.
 //!
 //! `MICROHEAR_SET="name=value,…"` overrides parameters for any command, for tuning runs:
 //! `MICROHEAR_SET=floor_min_tracker=1 microhear check clips/*.wav`.
@@ -167,7 +168,12 @@ fn events(path: &str) -> Result<()> {
     Ok(())
 }
 
-const LABELS: [&str; 6] = ["calm", "cutesy", "angry", "quiet", "loud", "startle"];
+const LABELS: [&str; 8] = [
+    "calm", "cutesy", "angry", "quiet", "loud", "startle", "clap", "snap",
+];
+
+/// Labels whose clips are sudden noises, scored by whether they startle.
+const NOISES: [&str; 3] = ["startle", "clap", "snap"];
 
 #[derive(Default)]
 struct Score {
@@ -229,7 +235,7 @@ fn check(paths: &[&str]) -> Result<()> {
                 _ => {}
             }
         }
-        if *label == "startle" {
+        if NOISES.contains(label) {
             score.voices += 1;
             score.hits += (clip_startles > 0) as u32;
         } else {
@@ -259,7 +265,7 @@ fn check(paths: &[&str]) -> Result<()> {
             s.clips, s.voices, s.hits, s.unjudged
         );
     }
-    println!("false startles (in clips not labelled startle): {false_startles}");
+    println!("false startles (in voice clips): {false_startles}");
     Ok(())
 }
 

@@ -2,10 +2,12 @@
 // `microhear check` and, later, a test set. The page is static (GitHub Pages), so this is the only
 // server: it checks the clip is what the page records (16 kHz mono 16-bit wav, a known label,
 // under the function body limit) and stores it under clips/<label>/.
-import { list, put } from "@vercel/blob";
+import { del, list, put } from "@vercel/blob";
 
 // `unlabelled` is a session nobody said what it was: kept, but out of the labelled test set.
-const LABELS = new Set(["calm", "cutesy", "angry", "quiet", "loud", "startle", "unlabelled"]);
+const LABELS = new Set([
+  "calm", "cutesy", "angry", "quiet", "loud", "startle", "clap", "snap", "unlabelled",
+]);
 
 // Browsers only from the page itself. Not security, curl can say anything, but it keeps other
 // sites from posting into the store from their visitors' browsers.
@@ -22,7 +24,7 @@ function cors(origin) {
   return ORIGINS.has(origin)
     ? {
         "access-control-allow-origin": origin,
-        "access-control-allow-methods": "GET, POST, OPTIONS",
+        "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
         "access-control-allow-headers": "content-type",
         vary: "origin",
       }
@@ -79,4 +81,18 @@ export async function GET(request) {
     cursor = page.cursor;
   } while (cursor);
   return Response.json(counts, { headers: { ...headers, "cache-control": "no-store" } });
+}
+
+// A bad take, deleted by the page that recorded it. Only paths this function writes are
+// accepted; the random suffix means only whoever uploaded a clip knows its path.
+export async function DELETE(request) {
+  const headers = cors(request.headers.get("origin"));
+  if (!headers) return new Response("origin not allowed", { status: 403 });
+  const pathname = new URL(request.url).searchParams.get("pathname") ?? "";
+  const match = pathname.match(/^clips\/([a-z]+)\/[0-9TZ-]+-[0-9a-f]{8}\.wav$/);
+  if (!match || !LABELS.has(match[1])) {
+    return Response.json({ error: "not a clip path" }, { status: 400, headers });
+  }
+  await del(pathname);
+  return Response.json({ deleted: pathname }, { headers });
 }

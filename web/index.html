@@ -63,6 +63,16 @@
       .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); margin-top: 6px; }
       .legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 4px; }
 
+      .takes { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-top: 10px; }
+      .take { text-align: left; display: flex; flex-direction: column; gap: 2px; border: 2px solid var(--c); background: var(--bg); padding: 10px; }
+      .take b { color: var(--c); }
+      .take small { color: var(--muted); font-size: 11px; line-height: 1.35; }
+      .take .count.done { color: var(--c); font-weight: 700; }
+      .take.live { background: var(--c); }
+      .take.live b, .take.live small, .take.live .secs { color: var(--bg); }
+      .clip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 0; border-bottom: 1px solid var(--line); }
+      .clip audio { height: 28px; max-width: 220px; }
+      .clip button { padding: 2px 10px; font-size: 12px; }
       #log { max-height: 260px; overflow-y: auto; font-size: 13px; }
       #log div { padding: 3px 0; border-bottom: 1px solid var(--line); }
       .tag { display: inline-block; min-width: 76px; font-weight: 700; }
@@ -156,22 +166,13 @@
       <h2>events · what the brain tick would be handed</h2>
       <div class="panel"><div id="log"><p>events appear here, newest first, with the frame they were known on.</p></div></div>
 
-      <h2>recordings</h2>
+      <h2>record takes</h2>
       <div class="panel">
-        <p>while record is on, everything between start mic and stop becomes one clip, and is
-          uploaded to a private store to tune and test the ear. say what you are about to do first:
-          <b style="color:var(--calm)">calm</b> before anything else, since it sets your baseline. the
-          goal is 10–15 clips of each.</p>
-        <div class="row">
-          <label class="chip"><input type="checkbox" id="record" checked> record</label>
-          <select id="label" style="font:inherit;padding:5px">
-            <option value="unlabelled">what is this? (unlabelled)</option>
-            <option>calm</option><option>cutesy</option><option>angry</option>
-            <option>quiet</option><option>loud</option><option>startle</option>
-          </select>
-          <span id="counts" style="font-size:13px"></span>
-        </div>
-        <div id="clips" style="font-size:13px"></div>
+        <p>press a button, do that thing, press it again to stop. each take is kept in a private store
+          to tune and test the ear; delete the bad ones. aim for 15 of each, calm first.</p>
+        <div class="takes" id="takes"></div>
+        <div id="clips" style="font-size:13px;margin-top:10px"></div>
+        <p style="font-size:12px">"start mic" at the top records too, as unlabelled.</p>
       </div>
 
       <h2>tune it live</h2>
