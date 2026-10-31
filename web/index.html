@@ -18,6 +18,11 @@
     <main>
       <h1>microhear</h1>
       <p>how the duck hears. level per 32 ms frame, last 10 s.</p>
+      <p>
+        the line is loudness, newest on the right. top is 0 dBFS, the loudest a mic can record;
+        bottom is −90 dBFS, near silence. so every reading is negative, and a quiet room sits low.
+        nothing is recorded or sent anywhere: samples live in memory and are gone when you stop.
+      </p>
       <button id="start">start mic</button>
       <span id="level"></span>
       <canvas id="trace" width="1440" height="400"></canvas>

@@ -10,7 +10,12 @@ const HISTORY = 312;
 const MIN_DB = -90;
 const levels = [];
 
-button.addEventListener("click", async () => {
+// What is open while listening, so stopping can release the mic and the browser's indicator goes out.
+let session = null;
+
+button.addEventListener("click", () => (session ? stop() : start()));
+
+async function start() {
   button.disabled = true;
   await init();
   const ear = new Ear();
@@ -31,9 +36,20 @@ button.addEventListener("click", async () => {
       if (levels.length > HISTORY) levels.shift();
     }
   };
-  button.textContent = "listening";
-  requestAnimationFrame(draw);
-});
+  session = { stream, audio, ear, frame: requestAnimationFrame(draw) };
+  button.textContent = "stop";
+  button.disabled = false;
+}
+
+function stop() {
+  const { stream, audio, ear, frame } = session;
+  session = null;
+  cancelAnimationFrame(frame);
+  stream.getTracks().forEach((t) => t.stop());
+  audio.close();
+  ear.free();
+  button.textContent = "start mic";
+}
 
 function draw() {
   const { width, height } = canvas;
@@ -48,5 +64,5 @@ function draw() {
   ctx2d.stroke();
   const last = levels.at(-1);
   if (last !== undefined) readout.textContent = `${last.toFixed(1)} dBFS`;
-  requestAnimationFrame(draw);
+  if (session) session.frame = requestAnimationFrame(draw);
 }
