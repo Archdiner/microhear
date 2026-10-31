@@ -1,13 +1,31 @@
-//! The room floor, as microduck's `SoundSentry` keeps it (`pet-detect/src/worker.rs`, cbe0a9f).
+//! The room floor, as microduck's `SoundSentry` keeps it (`pet-detect/src/worker.rs`).
 //!
 //! On the duck the sentry owns the floor and robotd hands it over with [`crate::Ear::set_floor`];
 //! this mirror exists so the browser and the CLI hear against the same floor without a duck.
 //! Linear RMS, like the sentry, and the same constants: change one and the other goes with it.
+//!
+//! Two rules for how the floor moves outside an event, because the sentry is mid-change:
+//!
+//! - [`Rule::Mean`]: microduck main today (cbe0a9f), an EMA with τ ≈ 6 s. It learns talking: speech
+//!   under the 6× on-threshold is never an event, so it is averaged in, and so is the frame that
+//!   starts an event. A few clips of conversation lift a −65 dBFS room to a −37 dBFS floor.
+//! - [`Rule::FastDownSlowUp`]: the fix proposed upstream (Archdiner/microduck `sentry-min-floor`,
+//!   ac1f470). Down to a quieter frame at once, up at most 3 dB/s; speech's word gaps hold it at
+//!   the room. Everything else, event freezing and the 3 s absorption, is the same.
 
 /// Where the sentry's floor starts, ≈ -50 dBFS.
 const START: f32 = 0.003;
-/// Per-frame EMA weight, τ ≈ 200 frames ≈ 6.4 s.
+/// Per-frame EMA weight, τ ≈ 200 frames ≈ 6.4 s ([`Rule::Mean`]).
 const ALPHA: f32 = 0.005;
+/// 3 dB a second as a per-frame factor, and the lowest the floor goes ([`Rule::FastDownSlowUp`]).
+const UP_PER_FRAME: f32 = 1.011_114;
+const FLOOR_MIN: f32 = 1e-6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    Mean,
+    FastDownSlowUp,
+}
 /// An event starts at 6× the floor and ends after 3 frames under 3× it.
 const ON_RATIO: f32 = 6.0;
 const OFF_RATIO: f32 = 3.0;
@@ -42,13 +60,17 @@ impl Default for SentryFloor {
 impl SentryFloor {
     /// The floor this frame is judged against, then the sentry's update for it. `petting` is the
     /// sentry's petting hold: it keeps an event from starting, which keeps the floor adapting.
-    pub fn frame(&mut self, rms: f32, petting: bool) -> f32 {
+    pub fn frame(&mut self, rms: f32, petting: bool, rule: Rule) -> f32 {
         let floor = self.floor;
         let on = (floor * ON_RATIO).max(ON_MIN);
         let off = (floor * OFF_RATIO).max(OFF_MIN);
         self.cooldown_frames = self.cooldown_frames.saturating_sub(1);
         if !self.in_event {
-            self.floor = (1.0 - ALPHA) * self.floor + ALPHA * rms;
+            self.floor = match rule {
+                Rule::Mean => (1.0 - ALPHA) * self.floor + ALPHA * rms,
+                Rule::FastDownSlowUp if rms < self.floor => rms.max(FLOOR_MIN),
+                Rule::FastDownSlowUp => self.floor * UP_PER_FRAME,
+            };
             if rms > on && self.cooldown_frames == 0 && !petting {
                 self.in_event = true;
                 self.event_frames = 1;
@@ -74,92 +96,60 @@ impl SentryFloor {
 mod tests {
     use super::*;
 
-    /// The ratchet the sentry's floor has and this one does not: a room with someone talking.
-    #[test]
-    fn talking_does_not_raise_the_min_floor() {
-        let (mut sentry, mut min) = (SentryFloor::default(), MinFloor::default());
-        for _ in 0..2000 {
-            sentry.frame(0.001, false);
-            min.frame(0.001);
+    fn run(f: &mut SentryFloor, rule: Rule, rms: f32, n: usize) -> f32 {
+        let mut last = 0.0;
+        for _ in 0..n {
+            last = f.frame(rms, false, rule);
         }
-        // Ten sentences at ~10 dB over the room (under the sentry's 6×), with word gaps.
-        for _ in 0..10 {
-            for frame in 0..60 {
-                let rms = if frame % 10 == 9 { 0.001 } else { 0.003 };
-                sentry.frame(rms, false);
-                min.frame(rms);
+        last
+    }
+
+    #[test]
+    fn both_rules_settle_on_a_quiet_room() {
+        for rule in [Rule::Mean, Rule::FastDownSlowUp] {
+            let mut f = SentryFloor::default();
+            let floor = run(&mut f, rule, 0.0005, 2000);
+            assert!((floor - 0.0005).abs() < 2e-5, "{rule:?}: {floor}");
+        }
+    }
+
+    /// The ratchet: someone talking at ~10 dB over the room, under the 6× that makes an event,
+    /// with word gaps. The mean learns it; the fix sits in the gaps.
+    #[test]
+    fn talking_raises_the_mean_and_not_the_fix() {
+        let talk = |rule| {
+            let mut f = SentryFloor::default();
+            run(&mut f, rule, 0.001, 2000);
+            for _ in 0..60 {
+                run(&mut f, rule, 0.003, 9);
+                run(&mut f, rule, 0.001, 1);
             }
-        }
-        assert!(
-            sentry.frame(0.001, false) > 0.002,
-            "the sentry learned the talking"
-        );
-        assert!(min.frame(0.001) < 0.0012);
-    }
-
-    #[test]
-    fn adapts_down_to_a_quiet_room() {
-        let mut f = SentryFloor::default();
-        for _ in 0..2000 {
-            f.frame(0.0005, false);
-        }
-        assert!((f.frame(0.0005, false) - 0.0005).abs() < 1e-5);
-    }
-
-    #[test]
-    fn a_short_sound_does_not_move_it() {
-        let mut f = SentryFloor::default();
-        for _ in 0..2000 {
-            f.frame(0.001, false);
-        }
-        for _ in 0..10 {
-            f.frame(0.1, false);
-        }
-        // Only the frame that starts the event is averaged in (the sentry updates the floor before
-        // it checks the threshold): 0.5% of 0.1 lands on top, nothing after it.
-        assert!((f.frame(0.001, false) - 0.0015).abs() < 1e-4);
-    }
-
-    #[test]
-    fn three_seconds_of_loud_becomes_the_room() {
-        let mut f = SentryFloor::default();
-        for _ in 0..2000 {
-            f.frame(0.001, false);
-        }
-        for _ in 0..100 {
-            f.frame(0.05, false);
-        }
-        assert!(f.frame(0.05, false) >= 0.025);
-    }
-}
-
-/// An experiment beside the sentry's floor, not a replacement for it: the classic noise-floor
-/// tracker from speech processing, fast down and slow up. It drops to any frame quieter than it
-/// at once, and climbs at most [`MIN_UP_DB_PER_S`]. Speech has gaps between words, so it cannot
-/// pull this floor up the way it pulls up a mean; a vacuum that runs for ten seconds still can.
-#[derive(Debug, Clone)]
-pub struct MinFloor {
-    floor: f32,
-}
-
-pub const MIN_UP_DB_PER_S: f32 = 3.0;
-
-impl Default for MinFloor {
-    fn default() -> Self {
-        Self { floor: START }
-    }
-}
-
-impl MinFloor {
-    pub fn frame(&mut self, rms: f32) -> f32 {
-        let floor = self.floor;
-        let up =
-            10f32.powf(MIN_UP_DB_PER_S / 20.0 / (crate::SAMPLE_RATE as f32 / crate::FRAME as f32));
-        self.floor = if rms < self.floor {
-            rms.max(1e-6)
-        } else {
-            self.floor * up
+            f.frame(0.001, false, rule)
         };
-        floor
+        assert!(talk(Rule::Mean) > 0.002);
+        assert!(talk(Rule::FastDownSlowUp) < 0.0012);
+    }
+
+    /// The frame that starts an event is averaged into the mean: half a percent of a clap.
+    #[test]
+    fn a_clap_lifts_the_mean_and_not_the_fix() {
+        let clap = |rule| {
+            let mut f = SentryFloor::default();
+            run(&mut f, rule, 0.001, 2000);
+            run(&mut f, rule, 0.1, 10);
+            f.frame(0.001, false, rule)
+        };
+        assert!((clap(Rule::Mean) - 0.0015).abs() < 1e-4);
+        // On a steady room this floor sits within a step (0.1 dB) of it; two steps of slack.
+        assert!(clap(Rule::FastDownSlowUp) < 0.00105);
+    }
+
+    #[test]
+    fn three_seconds_of_loud_becomes_the_room_under_either() {
+        for rule in [Rule::Mean, Rule::FastDownSlowUp] {
+            let mut f = SentryFloor::default();
+            run(&mut f, rule, 0.001, 2000);
+            assert!(run(&mut f, rule, 0.05, 101) >= 0.025, "{rule:?}");
+        }
     }
 }

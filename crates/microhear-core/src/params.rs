@@ -37,9 +37,10 @@ macro_rules! params {
 }
 
 params! {
-    /// 0: hear against the sentry's floor (what the duck does). 1: against the min-tracking floor,
-    /// an experiment (see `floor::MinFloor`). Ignored once the duck hands its floor over.
-    floor_min_tracker = 0.0;
+    /// Which rule the sentry's floor moves by (see `floor`): 1 is fast down, slow up, the fix
+    /// proposed upstream and what microhear hears by; 0 is the mean microduck main has today, which
+    /// learns talking. Ignored once the duck hands its floor over.
+    floor_min_tracker = 1.0;
     /// dB over the floor where a sound starts: the sentry's 6×, so the two agree on "a sound".
     onset_db = 15.6;
     /// dB over the floor for a startle: well past a sound, into a bang.

@@ -8,7 +8,8 @@
 //! `arecord -D plughw:aic3104,0 -f S16_LE -r 16000 -c 1 -d 30 clip.wav`
 //!
 //! `microhear check <clips…>`: one person's labelled clips, scored. The label is in the file name
-//! (`calm`, `cutesy`, `angry`, `quiet`, `loud`, `startle`), as the page names its downloads. Calm
+//! (`calm`, `cutesy`, `angry`, `quiet`, `loud`, `startle`), as the page names its downloads, or
+//! the folder, as `collect/pull.mjs` lays them out. Calm
 //! clips go first through one ear, because they are what set the speaker's baseline; every clip
 //! after is heard against it, the way the duck would hear that person. Startles in clips not
 //! labelled `startle` are counted as false alarms.
@@ -178,9 +179,16 @@ struct Score {
 }
 
 fn check(paths: &[&str]) -> Result<()> {
+    // The file name first (the page's downloads), then the folder (`collect/pull.mjs` keeps
+    // clips/<label>/).
     let label_of = |path: &str| {
-        let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
-        LABELS.into_iter().find(|l| name.contains(l))
+        let mut parts = path.rsplit('/').map(str::to_lowercase);
+        let name = parts.next().unwrap_or_default();
+        let folder = parts.next().unwrap_or_default();
+        LABELS
+            .into_iter()
+            .find(|l| name.contains(l))
+            .or_else(|| LABELS.into_iter().find(|l| folder == *l))
     };
     let mut clips: Vec<(&str, &str)> = Vec::new();
     for &p in paths {

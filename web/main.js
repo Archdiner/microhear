@@ -28,6 +28,10 @@ const SLIDERS = [
   ["loudness", "quiet_db", "quiet voice", -20, -1, 0.5, "dB", "under your baseline loudness"],
 ];
 
+// The one server: a Vercel function that keeps clips in a private Blob store (collect/).
+const COLLECT = "https://microhear-collect.vercel.app/api/clip";
+const GOAL = 15;
+
 let ear = null;
 let recording = null;
 const clips = [];
@@ -233,11 +237,40 @@ function finishRecording() {
   const label = $("label").value;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const name = `microhear-${label}-${stamp}.wav`;
-  clips.unshift({ name, label, seconds: n / 16000, url: URL.createObjectURL(new Blob([wav], { type: "audio/wav" })) });
+  const blob = new Blob([wav], { type: "audio/wav" });
+  const clip = { name, label, seconds: n / 16000, url: URL.createObjectURL(blob), status: "uploading…" };
+  clips.unshift(clip);
+  renderClips();
+  fetch(`${COLLECT}?label=${label}`, { method: "POST", headers: { "content-type": "audio/wav" }, body: blob })
+    .then(async (r) => (r.ok ? "uploaded ✓" : `not uploaded: ${(await r.json().catch(() => ({}))).error ?? r.status}`))
+    .catch(() => "not uploaded: offline?")
+    .then((status) => {
+      clip.status = status;
+      renderClips();
+      refreshCounts();
+    });
+}
+
+async function refreshCounts() {
+  try {
+    const counts = await (await fetch(COLLECT, { cache: "no-store" })).json();
+    $("counts").innerHTML = ["calm", "cutesy", "angry", "quiet", "loud", "startle"]
+      .map((l) => {
+        const n = counts[l] ?? 0;
+        const color = ["calm", "cutesy", "angry"].includes(l) ? `var(--${l})` : "inherit";
+        return `<span class="chip" style="margin-right:4px;${n >= GOAL ? `outline:2px solid ${color}` : ""}"><b style="color:${color}">${l}</b> ${n}/${GOAL}</span>`;
+      })
+      .join("");
+  } catch {
+    $("counts").textContent = "";
+  }
+}
+
+function renderClips() {
   $("clips").innerHTML = clips
     .map((c) => `<div><span class="tag" style="color:${toneColor(["calm", "cutesy", "angry"].includes(c.label) ? c.label : null)}">${c.label}</span>
       ${c.seconds.toFixed(1)} s <audio controls src="${c.url}" style="height:28px;vertical-align:middle"></audio>
-      <a href="${c.url}" download="${c.name}">download</a></div>`)
+      <a href="${c.url}" download="${c.name}">download</a> <span style="color:var(--muted)">${c.status}</span></div>`)
     .join("");
 }
 
@@ -449,6 +482,7 @@ function drawPitch(last, x) {
 }
 
 // Last, so every function and constant above exists before the first frame is drawn.
+refreshCounts();
 await init();
 ear = new Ear();
 buildSliders();

@@ -35,8 +35,9 @@ outside events, absorbing anything loud for 3 s+). L1 reads that floor; it does 
 one that could drift from it. **open question:** that floor learns talking. speech under 6× the
 floor is never an event, so it is averaged in, and the frame that starts an event leaks in too; a
 few clips of conversation lift it from -65 to -37 dBFS and a quiet voice disappears under it.
-`floor_min_tracker=1` swaps in a fast-down slow-up tracker as an experiment; on the labelled test
-clips it hears the quiet voice and the claps the sentry floor misses.
+the fix, a floor that falls fast and rises slowly, is proposed upstream (Archdiner/microduck
+`sentry-min-floor`) and is what microhear hears by now (`floor_min_tracker=1`); `0` is the mean
+microduck main has today, for comparison.
 
 ## downstream
 
@@ -53,6 +54,7 @@ clips it hears the quiet voice and the claps the sentry floor misses.
 | `crates/microhear-core` | the ear. pure dsp, no deps |
 | `crates/microhear-wasm` | browser binding |
 | `crates/microhear-cli` | `microhear clip.wav` → per-frame csv. `microhear events clip.wav` → the event timeline, for tuning on recordings. `microhear probe` → how raw pcm arrives on stdin and what the ear costs |
+| `collect/` | the page's one server: a vercel function keeping uploaded clips in a private blob store. `node collect/pull.mjs clips` brings them down |
 | `web/` | live mic or a recording through the same worklet, every layer drawn, sliders for every threshold. deployed to github pages |
 
 ## run
@@ -66,10 +68,10 @@ cargo install wasm-bindgen-cli --version 0.2.100
 scripts/build-web.sh && python3 -m http.server -d web 8000
 ```
 
-score labelled clips of one person (record them on the page; the label is in the file name):
+score labelled clips of one person. the page uploads every recording; aim for 10–15 per label:
 
 ```sh
-microhear check clips/*.wav                          # calm first: it sets the baseline
+node collect/pull.mjs clips && microhear check clips/*/*.wav   # calm first: it sets the baseline
 MICROHEAR_SET=floor_min_tracker=1 microhear check clips/*.wav   # any parameter, for tuning
 ```
 

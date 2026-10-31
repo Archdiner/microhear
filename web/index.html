@@ -156,18 +156,20 @@
       <h2>events · what the brain tick would be handed</h2>
       <div class="panel"><div id="log"><p>events appear here, newest first, with the frame they were known on.</p></div></div>
 
-      <h2>record labelled clips</h2>
+      <h2>recordings</h2>
       <div class="panel">
-        <p>tick record, pick what you are about to do, then start mic and stop when done: everything
-          between start and stop becomes one clip. record <b style="color:var(--calm)">calm</b> first,
-          it is what sets your baseline. clips stay on this device until you download them.</p>
+        <p>while record is on, everything between start mic and stop becomes one clip, and is
+          uploaded to a private store to tune and test the ear. say what you are about to do first:
+          <b style="color:var(--calm)">calm</b> before anything else, since it sets your baseline. the
+          goal is 10–15 clips of each.</p>
         <div class="row">
-          <label class="chip"><input type="checkbox" id="record"> record</label>
+          <label class="chip"><input type="checkbox" id="record" checked> record</label>
           <select id="label" style="font:inherit;padding:5px">
+            <option value="unlabelled">what is this? (unlabelled)</option>
             <option>calm</option><option>cutesy</option><option>angry</option>
             <option>quiet</option><option>loud</option><option>startle</option>
           </select>
-          <span style="color:var(--muted);font-size:13px">score them later: <code>microhear check clips/*.wav</code></span>
+          <span id="counts" style="font-size:13px"></span>
         </div>
         <div id="clips" style="font-size:13px"></div>
       </div>

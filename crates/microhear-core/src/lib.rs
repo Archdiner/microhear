@@ -170,8 +170,7 @@ pub struct Event {
 
 #[derive(Debug, Clone)]
 enum Floor {
-    /// Both kept warm, so flipping `floor_min_tracker` mid-stream compares them on the same room.
-    Mirror(floor::SentryFloor, floor::MinFloor),
+    Mirror(floor::SentryFloor),
     /// Handed over by the duck's `SoundSentry`, RMS.
     External(f32),
 }
@@ -230,7 +229,7 @@ impl Ear {
             pending: Vec::with_capacity(FRAME),
             window: vec![0.0; 2 * FRAME],
             frames: 0,
-            floor: Floor::Mirror(floor::SentryFloor::default(), floor::MinFloor::default()),
+            floor: Floor::Mirror(floor::SentryFloor::default()),
             levels: [SILENCE_DB; 2],
             petting: false,
             petting_hold: 0,
@@ -292,10 +291,13 @@ impl Ear {
         let muted = self.petting || self.petting_hold > 0;
 
         let floor_rms = match &mut self.floor {
-            Floor::Mirror(sentry, min) => {
-                let rms = 10f32.powf(level / 20.0);
-                let (s, m) = (sentry.frame(rms, muted), min.frame(rms));
-                if p.floor_min_tracker >= 0.5 { m } else { s }
+            Floor::Mirror(sentry) => {
+                let rule = if p.floor_min_tracker >= 0.5 {
+                    floor::Rule::FastDownSlowUp
+                } else {
+                    floor::Rule::Mean
+                };
+                sentry.frame(10f32.powf(level / 20.0), muted, rule)
             }
             Floor::External(rms) => *rms,
         };
@@ -753,8 +755,9 @@ mod tests {
             "554 onset",
             "557 utterance start 555",
             "599 utterance end 555..592 angry +2.0 st +11.9 dB loud",
-            // +10.0 s: 10 dB quieter. No onset: the shout lifted the sentry's floor ~15 dB (the
-            // frame that starts an event is averaged in), and this voice is under 6× of it.
+            // +10.0 s: 10 dB quieter, and still a sound rising out of the room. Under the mean
+            // rule this onset went missing: the shout's first frame had lifted the floor.
+            "632 onset",
             "635 utterance start 633",
             "677 utterance end 633..670 calm +0.0 st -10.0 dB quiet",
         ];
