@@ -74,6 +74,29 @@ impl SentryFloor {
 mod tests {
     use super::*;
 
+    /// The ratchet the sentry's floor has and this one does not: a room with someone talking.
+    #[test]
+    fn talking_does_not_raise_the_min_floor() {
+        let (mut sentry, mut min) = (SentryFloor::default(), MinFloor::default());
+        for _ in 0..2000 {
+            sentry.frame(0.001, false);
+            min.frame(0.001);
+        }
+        // Ten sentences at ~10 dB over the room (under the sentry's 6×), with word gaps.
+        for _ in 0..10 {
+            for frame in 0..60 {
+                let rms = if frame % 10 == 9 { 0.001 } else { 0.003 };
+                sentry.frame(rms, false);
+                min.frame(rms);
+            }
+        }
+        assert!(
+            sentry.frame(0.001, false) > 0.002,
+            "the sentry learned the talking"
+        );
+        assert!(min.frame(0.001) < 0.0012);
+    }
+
     #[test]
     fn adapts_down_to_a_quiet_room() {
         let mut f = SentryFloor::default();
@@ -107,5 +130,36 @@ mod tests {
             f.frame(0.05, false);
         }
         assert!(f.frame(0.05, false) >= 0.025);
+    }
+}
+
+/// An experiment beside the sentry's floor, not a replacement for it: the classic noise-floor
+/// tracker from speech processing, fast down and slow up. It drops to any frame quieter than it
+/// at once, and climbs at most [`MIN_UP_DB_PER_S`]. Speech has gaps between words, so it cannot
+/// pull this floor up the way it pulls up a mean; a vacuum that runs for ten seconds still can.
+#[derive(Debug, Clone)]
+pub struct MinFloor {
+    floor: f32,
+}
+
+pub const MIN_UP_DB_PER_S: f32 = 3.0;
+
+impl Default for MinFloor {
+    fn default() -> Self {
+        Self { floor: START }
+    }
+}
+
+impl MinFloor {
+    pub fn frame(&mut self, rms: f32) -> f32 {
+        let floor = self.floor;
+        let up =
+            10f32.powf(MIN_UP_DB_PER_S / 20.0 / (crate::SAMPLE_RATE as f32 / crate::FRAME as f32));
+        self.floor = if rms < self.floor {
+            rms.max(1e-6)
+        } else {
+            self.floor * up
+        };
+        floor
     }
 }

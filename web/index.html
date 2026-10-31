@@ -95,6 +95,7 @@
         <button id="pet" title="or hold P">hold to pet</button>
         <label class="chip" style="cursor:pointer">play a recording <input id="file" type="file" accept="audio/*" hidden></label>
         <button id="reset">relearn my baseline</button>
+        <label class="chip"><input type="checkbox" id="duck" checked> duck timing (128 ms batches)</label>
         <span id="startle">⚡ STARTLE</span>
         <span id="status" class="chip">mic off</span>
       </div>
@@ -123,6 +124,7 @@
             <span class="chip" id="now-over">– over floor</span>
             <span class="chip" id="now-pitch">no pitch</span>
             <span class="chip" id="now-loud">loudness –</span>
+            <span class="chip" id="now-rich">richness –</span>
           </div>
         </section>
       </div>
@@ -154,6 +156,22 @@
       <h2>events · what the brain tick would be handed</h2>
       <div class="panel"><div id="log"><p>events appear here, newest first, with the frame they were known on.</p></div></div>
 
+      <h2>record labelled clips</h2>
+      <div class="panel">
+        <p>tick record, pick what you are about to do, then start mic and stop when done: everything
+          between start and stop becomes one clip. record <b style="color:var(--calm)">calm</b> first,
+          it is what sets your baseline. clips stay on this device until you download them.</p>
+        <div class="row">
+          <label class="chip"><input type="checkbox" id="record"> record</label>
+          <select id="label" style="font:inherit;padding:5px">
+            <option>calm</option><option>cutesy</option><option>angry</option>
+            <option>quiet</option><option>loud</option><option>startle</option>
+          </select>
+          <span style="color:var(--muted);font-size:13px">score them later: <code>microhear check clips/*.wav</code></span>
+        </div>
+        <div id="clips" style="font-size:13px"></div>
+      </div>
+
       <h2>tune it live</h2>
       <p>every slider moves the same number the rust core decides with; the duck and this page share the code.</p>
       <div class="panel"><div class="sliders" id="sliders"></div>
@@ -175,7 +193,8 @@
           <div class="box"><b>mic</b>browser processing off: no agc, no noise suppression</div><span class="arrow">►</span>
           <div class="box"><b>audio worklet</b>128-sample (8 ms) blocks at 16 kHz</div><span class="arrow">►</span>
           <div class="box"><b>wasm ear</b>the same rust core, compiled to wasm</div><span class="arrow">►</span>
-          <div class="box ram"><b>memory now</b><span id="mem">–</span></div>
+          <div class="box ram"><b>memory now</b><span id="mem">–</span></div><span class="arrow">►</span>
+          <div class="box"><b>cpu</b><span id="cpu">–</span></div>
         </div>
         <p>nothing touches disk on either side. raw audio is kept for exactly two frames (64 ms), as long
           as pitch needs, and then overwritten. what survives is features (a few numbers per 32 ms) and
@@ -186,14 +205,14 @@
       <div class="panel">
         <table>
           <tr><th>reads as</th><th>cue</th><th>why</th></tr>
-          <tr><td style="color:var(--startle)">startle</td><td>≥ startle_db over the floor, climbed ≥ startle_rise_db within 64 ms, and loud outright</td>
+          <tr><td style="color:var(--startle)">startle</td><td>≥ startle_db over the floor, climbed ≥ startle_rise_db within 64 ms, loud outright, and still noise-like on the next frame (a clap, not a voice)</td>
             <td>the mammal startle reflex is a brainstem shortcut (≈ 6–12 ms in cats), decided before any listening. it fires on the frame, not after the sound.</td></tr>
           <tr><td>onset</td><td>rises ≥ onset_db (soundsentry's 6×) out of the room</td><td>the cue to turn toward a sound. the duck has one mic, so turning is done by sweeping the head and following the loudness.</td></tr>
           <tr><td style="color:var(--calm)">calm</td><td>near your baseline in pitch and loudness</td><td>your neutral voice, learned from the first 1.5 s you speak, then followed slowly from calm speech only.</td></tr>
           <tr><td style="color:var(--cutesy)">cutesy</td><td>pitch ≥ cute_pitch_st over baseline, swinging sing-song, not shouting</td>
             <td>pet- and infant-directed speech raise mean pitch and widen its range; pet-directed matches infant-directed in pitch (burnham et al. 2002).</td></tr>
-          <tr><td style="color:var(--angry)">angry</td><td>≥ angry_loud_db over your loudness, ≥ angry_min_dbfs outright, bright (energy above 1 kHz)</td>
-            <td>hot anger is louder, higher-pitched and pushes energy above 1 kHz (banse & scherer 1996). both anger and cuteness raise pitch, so loudness is what separates them.</td></tr>
+          <tr><td style="color:var(--angry)">angry</td><td>≥ angry_loud_db over your loudness, ≥ angry_min_dbfs outright, a pressed voice (richness: brightness ÷ pitch)</td>
+            <td>hot anger is louder and pushes energy above 1 kHz (banse & scherer 1996). cute speech can be loud too, so a big sing-song pitch rise vetoes angry, not the other way round.</td></tr>
           <tr><td style="color:var(--quiet)">quiet / loud</td><td>loudness ± loud_db / quiet_db from your baseline</td><td>relative, so it works at any distance from the mic once the baseline is set.</td></tr>
         </table>
         <p>petting mutes everything (and ~1 s after): on the duck the mic is almost a contact mic, and a scratch is the loudest thing it hears.</p>

@@ -7,6 +7,15 @@
 //! Takes 16 kHz mono, which is what the duck records:
 //! `arecord -D plughw:aic3104,0 -f S16_LE -r 16000 -c 1 -d 30 clip.wav`
 //!
+//! `microhear check <clips…>`: one person's labelled clips, scored. The label is in the file name
+//! (`calm`, `cutesy`, `angry`, `quiet`, `loud`, `startle`), as the page names its downloads. Calm
+//! clips go first through one ear, because they are what set the speaker's baseline; every clip
+//! after is heard against it, the way the duck would hear that person. Startles in clips not
+//! labelled `startle` are counted as false alarms.
+//!
+//! `MICROHEAR_SET="name=value,…"` overrides parameters for any command, for tuning runs:
+//! `MICROHEAR_SET=floor_min_tracker=1 microhear check clips/*.wav`.
+//!
 //! `microhear probe`: raw S16_LE at 16 kHz on stdin, the shape robotd reads from
 //! `arecord -t raw`, and a summary on stdout of how it arrived and what the ear cost:
 //!
@@ -29,9 +38,32 @@ fn main() -> Result<()> {
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["probe"] => probe(),
         ["events", path] => events(path),
+        ["check", ref paths @ ..] if !paths.is_empty() => check(paths),
         [path] => frames(path),
-        _ => bail!("usage: microhear <file.wav> | microhear events <file.wav> | microhear probe"),
+        _ => bail!("usage: microhear <file.wav> | events <file.wav> | check <clips…> | probe"),
     }
+}
+
+/// An ear with `MICROHEAR_SET` applied.
+fn ear() -> Result<Ear> {
+    let mut ear = Ear::new();
+    if let Ok(set) = std::env::var("MICROHEAR_SET") {
+        for pair in set.split(',').filter(|p| !p.is_empty()) {
+            let (name, value) = pair
+                .split_once('=')
+                .context("MICROHEAR_SET is name=value,…")?;
+            let value: f32 = value
+                .parse()
+                .with_context(|| format!("{name} wants a number"))?;
+            if !ear.params.set(name, value) {
+                bail!(
+                    "no parameter {name}; there are {}",
+                    microhear_core::Params::NAMES.join(", ")
+                );
+            }
+        }
+    }
+    Ok(ear)
 }
 
 fn read_wav(path: &str) -> Result<Vec<f32>> {
@@ -59,7 +91,7 @@ fn read_wav(path: &str) -> Result<Vec<f32>> {
 fn hear(path: &str) -> Result<(Vec<FrameReport>, Vec<Event>)> {
     let samples = read_wav(path)?;
     let (mut frames, mut events) = (Vec::new(), Vec::new());
-    Ear::new().push(&samples, &mut frames, &mut events);
+    ear()?.push(&samples, &mut frames, &mut events);
     Ok((frames, events))
 }
 
@@ -131,6 +163,95 @@ fn events(path: &str) -> Result<()> {
         };
         println!("{:>8.3} s  #{:<6} {what}", frame_time_s(e.index), e.index);
     }
+    Ok(())
+}
+
+const LABELS: [&str; 6] = ["calm", "cutesy", "angry", "quiet", "loud", "startle"];
+
+#[derive(Default)]
+struct Score {
+    clips: u32,
+    voices: u32,
+    hits: u32,
+    unjudged: u32,
+    startles: u32,
+}
+
+fn check(paths: &[&str]) -> Result<()> {
+    let label_of = |path: &str| {
+        let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+        LABELS.into_iter().find(|l| name.contains(l))
+    };
+    let mut clips: Vec<(&str, &str)> = Vec::new();
+    for &p in paths {
+        match label_of(p) {
+            Some(l) => clips.push((p, l)),
+            None => eprintln!("skipping {p}: no label in its name ({})", LABELS.join(", ")),
+        }
+    }
+    // Calm first: it sets the baseline everything else is relative to.
+    clips.sort_by_key(|&(_, l)| l != "calm");
+
+    let mut ear = ear()?;
+    let mut scores: Vec<Score> = LABELS.iter().map(|_| Score::default()).collect();
+    let mut false_startles = 0;
+    let (mut frames, mut events) = (Vec::new(), Vec::new());
+    for (path, label) in &clips {
+        frames.clear();
+        events.clear();
+        ear.push(&read_wav(path)?, &mut frames, &mut events);
+        let score = &mut scores[LABELS.iter().position(|l| l == label).expect("known label")];
+        score.clips += 1;
+        let mut clip_startles = 0;
+        for e in &events {
+            match e.kind {
+                EventKind::Startle { .. } => clip_startles += 1,
+                EventKind::UtteranceEnd { tone, loudness, .. } => {
+                    score.voices += 1;
+                    let heard = match *label {
+                        "quiet" | "loud" => loudness.map(Loudness::as_str),
+                        _ => tone.map(Tone::as_str),
+                    };
+                    match heard {
+                        None => score.unjudged += 1,
+                        Some(h) if h == *label => score.hits += 1,
+                        Some(_) => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        if *label == "startle" {
+            score.voices += 1;
+            score.hits += (clip_startles > 0) as u32;
+        } else {
+            false_startles += clip_startles;
+        }
+        score.startles += clip_startles;
+        println!(
+            "{:<8} {path}: {} events, {clip_startles} startles",
+            label,
+            events.len()
+        );
+    }
+
+    println!("\nlabel     clips  heard  right  no-baseline  accuracy");
+    for (label, s) in LABELS.iter().zip(&scores) {
+        if s.clips == 0 {
+            continue;
+        }
+        let judged = s.voices - s.unjudged;
+        let acc = if judged > 0 {
+            format!("{:.0}%", 100.0 * s.hits as f32 / judged as f32)
+        } else {
+            "-".into()
+        };
+        println!(
+            "{label:<9} {:>5}  {:>5}  {:>5}  {:>11}  {acc:>8}",
+            s.clips, s.voices, s.hits, s.unjudged
+        );
+    }
+    println!("false startles (in clips not labelled startle): {false_startles}");
     Ok(())
 }
 

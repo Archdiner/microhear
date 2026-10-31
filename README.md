@@ -32,7 +32,11 @@ every pet reads as a startle.
 
 **one floor.** the room floor belongs to `SoundSentry`, which already adapts it (EMA, τ ≈ 6 s,
 outside events, absorbing anything loud for 3 s+). L1 reads that floor; it does not keep a second
-one that could drift from it.
+one that could drift from it. **open question:** that floor learns talking. speech under 6× the
+floor is never an event, so it is averaged in, and the frame that starts an event leaks in too; a
+few clips of conversation lift it from -65 to -37 dBFS and a quiet voice disappears under it.
+`floor_min_tracker=1` swaps in a fast-down slow-up tracker as an experiment; on the labelled test
+clips it hears the quiet voice and the claps the sentry floor misses.
 
 ## downstream
 
@@ -60,6 +64,13 @@ cargo run -p microhear-cli -- clip.wav
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.100
 scripts/build-web.sh && python3 -m http.server -d web 8000
+```
+
+score labelled clips of one person (record them on the page; the label is in the file name):
+
+```sh
+microhear check clips/*.wav                          # calm first: it sets the baseline
+MICROHEAR_SET=floor_min_tracker=1 microhear check clips/*.wav   # any parameter, for tuning
 ```
 
 cpu under a constrained aarch64 linux (the duck is an rk3566, 4× cortex-a55):

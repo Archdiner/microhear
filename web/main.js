@@ -10,10 +10,12 @@ const RULER_ST = 12;
 
 // The sliders: every one is a parameter of the rust core (crates/microhear-core/src/params.rs).
 const SLIDERS = [
+  ["room floor", "floor_min_tracker", "min-tracking floor (experiment)", 0, 1, 1, "", "0 = soundsentry's floor, what the duck uses. 1 = fast-down slow-up tracker: talking cannot ratchet it up"],
   ["reflex", "onset_db", "onset over floor", 3, 30, 0.1, "dB", "a sound rising out of the room; soundsentry's 6× is 15.6"],
   ["reflex", "startle_db", "startle over floor", 6, 50, 0.5, "dB", "how far over the room a startle must be"],
   ["reflex", "startle_rise_db", "startle suddenness", 3, 40, 0.5, "dB / 64 ms", "how fast it must climb: a clap, not a swell"],
-  ["reflex", "startle_min_dbfs", "startle loud outright", -60, 0, 0.5, "dBFS", "above talking, under a shout or clap"],
+  ["reflex", "startle_min_dbfs", "startle loud outright", -60, 0, 0.5, "dBFS", "above talking, under a clap or bang"],
+  ["reflex", "startle_min_aperiodicity", "startle noise-like", 0, 1, 0.01, "min", "a clap is noise (0.5+), a voice is not (≤ 0.2); checked on the frame after the rise"],
   ["voice", "voiced_db", "voice over floor", 0, 20, 0.5, "dB", "loud enough to look for a pitch"],
   ["voice", "voiced_aperiodicity", "voice periodicity", 0.05, 0.6, 0.01, "max", "yin: 0 is a pure tone, 1 is noise"],
   ["voice", "baseline_frames", "baseline learn time", 10, 150, 1, "frames", "voiced frames that set your baseline (47 ≈ 1.5 s)"],
@@ -21,12 +23,14 @@ const SLIDERS = [
   ["cutesy", "cute_spread_st", "sing-song swing", 0.25, 6, 0.25, "st", "pitch spread over the last second"],
   ["angry", "angry_loud_db", "louder than you", 1, 20, 0.5, "dB", "over your baseline loudness"],
   ["angry", "angry_min_dbfs", "loud outright", -60, 0, 0.5, "dBFS", "the floor on loudness angry needs"],
-  ["angry", "angry_bright_hz", "brightness", 300, 3000, 25, "Hz", "energy pushed above 1 kHz; tune on your voice"],
+  ["angry", "angry_richness", "pressed voice", 1, 20, 0.1, "× pitch", "brightness ÷ pitch: how far up the harmonics the energy reaches. live value shown above"],
   ["loudness", "loud_db", "loud voice", 1, 20, 0.5, "dB", "over your baseline loudness"],
   ["loudness", "quiet_db", "quiet voice", -20, -1, 0.5, "dB", "under your baseline loudness"],
 ];
 
 let ear = null;
+let recording = null;
+const clips = [];
 let session = null;
 const frames = [];
 const spans = []; // utterances: {start, end, tone}
@@ -58,7 +62,7 @@ async function listen(connect, label) {
   const audio = new AudioContext({ sampleRate: sample_rate() });
   await audio.audioWorklet.addModule("./worklet.js");
   const tap = new AudioWorkletNode(audio, "tap");
-  tap.port.onmessage = ({ data }) => hear(ear.push(data));
+  tap.port.onmessage = ({ data }) => take(data);
   const release = await connect(audio, tap);
   session = { audio, release };
   $("start").textContent = "stop";
@@ -77,6 +81,7 @@ async function start() {
       audio.createMediaStreamSource(stream).connect(tap);
       return () => stream.getTracks().forEach((t) => t.stop());
     }, "listening");
+    startRecording();
   } catch (e) {
     $("error").textContent = `could not start the mic: ${e.message}. firefox cannot open a 16 kHz mic stream; try chrome or safari.`;
   }
@@ -99,11 +104,42 @@ $("file").addEventListener("change", async (e) => {
   }, `playing ${file.name}`);
 });
 
+// Every block from the worklet: kept for the recorder, then batched the way the duck batches if
+// asked (arecord hands robotd 2048 samples, 128 ms, at a time) and timed.
+const DUCK_BATCH = 2048;
+let batch = [];
+let batched = 0;
+const cpu = { us: 0, frames: 0 };
+function take(block) {
+  if (recording) recording.push(block);
+  if (!$("duck").checked) return push(block);
+  batch.push(block);
+  batched += block.length;
+  if (batched < DUCK_BATCH) return;
+  const joined = new Float32Array(batched);
+  let at = 0;
+  for (const b of batch) joined.set(b, (at += b.length) - b.length);
+  batch = [];
+  batched = 0;
+  push(joined);
+}
+function push(samples) {
+  const t = performance.now();
+  const json = ear.push(samples);
+  const spent = (performance.now() - t) * 1000;
+  const parsed = hear(json);
+  if (parsed) {
+    cpu.us += spent;
+    cpu.frames += parsed;
+  }
+}
+
 function stop() {
   const { audio, release } = session;
   session = null;
   release();
   audio.close();
+  finishRecording();
   $("start").textContent = "start mic";
   $("status").textContent = "mic off";
 }
@@ -127,6 +163,7 @@ function hear(json) {
   log.length = Math.min(log.length, 60);
   if (events.length) renderLog();
   if (batch.length) renderNow(batch.at(-1));
+  return batch.length;
 }
 
 function setParam(name, value) {
@@ -135,6 +172,7 @@ function setParam(name, value) {
   input.value = value;
   $(`v-${name}`).textContent = fmt(value);
   if (name === "cute_pitch_st") buildRuler();
+  if (name === "floor_min_tracker") $("v-floor_min_tracker").textContent = value >= 0.5 ? "min-tracker" : "soundsentry";
 }
 
 const fmt = (v) => (Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
@@ -171,6 +209,38 @@ function buildRuler() {
     <div class="needle" id="needle" style="left:50%;opacity:0"></div>`;
 }
 
+// Recording: the raw 16 kHz samples between start and stop, labelled, as a wav you download.
+// Nothing leaves the page; the clips are for `microhear check` and, later, a test set.
+function startRecording() {
+  recording = $("record").checked ? [] : null;
+}
+function finishRecording() {
+  if (!recording?.length) return (recording = null);
+  const n = recording.reduce((a, b) => a + b.length, 0);
+  const wav = new DataView(new ArrayBuffer(44 + 2 * n));
+  const text = (at, s) => [...s].forEach((c, i) => wav.setUint8(at + i, c.charCodeAt(0)));
+  text(0, "RIFF"); wav.setUint32(4, 36 + 2 * n, true); text(8, "WAVEfmt ");
+  wav.setUint32(16, 16, true); wav.setUint16(20, 1, true); wav.setUint16(22, 1, true);
+  wav.setUint32(24, 16000, true); wav.setUint32(28, 32000, true); wav.setUint16(32, 2, true);
+  wav.setUint16(34, 16, true); text(36, "data"); wav.setUint32(40, 2 * n, true);
+  let at = 44;
+  for (const block of recording)
+    for (const v of block) {
+      wav.setInt16(at, Math.max(-1, Math.min(1, v)) * 32767, true);
+      at += 2;
+    }
+  recording = null;
+  const label = $("label").value;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const name = `microhear-${label}-${stamp}.wav`;
+  clips.unshift({ name, label, seconds: n / 16000, url: URL.createObjectURL(new Blob([wav], { type: "audio/wav" })) });
+  $("clips").innerHTML = clips
+    .map((c) => `<div><span class="tag" style="color:${toneColor(["calm", "cutesy", "angry"].includes(c.label) ? c.label : null)}">${c.label}</span>
+      ${c.seconds.toFixed(1)} s <audio controls src="${c.url}" style="height:28px;vertical-align:middle"></audio>
+      <a href="${c.url}" download="${c.name}">download</a></div>`)
+    .join("");
+}
+
 // The verdict on the last whole utterance stays up after it ends, where the live bars go blank.
 function renderLastVoice(e) {
   const el = $("last-voice");
@@ -182,6 +252,7 @@ function renderNow(f) {
   $("now-level").textContent = `${f.level.toFixed(1)} dBFS`;
   $("now-over").textContent = `${f.over >= 0 ? "+" : ""}${f.over.toFixed(1)} dB over floor`;
   $("now-pitch").textContent = f.voiced ? `${f.hz.toFixed(0)} Hz` : "no pitch";
+  $("now-rich").textContent = f.voiced ? `richness ${(f.bright / f.hz).toFixed(1)}` : "richness –";
   const loud = $("now-loud");
   loud.textContent = f.loudness ? `${f.loudness} voice` : "loudness –";
   loud.style.background = f.loudness === "loud" ? css("--angry") : f.loudness === "quiet" ? css("--quiet") : "";
@@ -243,14 +314,18 @@ function renderLog() {
     .join("");
 }
 
+// The CSS height is read once and kept apart: setting canvas.height rewrites the height
+// attribute, so reading it back each frame grew the canvas by devicePixelRatio every frame.
 function fit(canvas) {
+  canvas.dataset.cssHeight ??= canvas.getAttribute("height");
+  const cssHeight = Number(canvas.dataset.cssHeight);
   const ratio = devicePixelRatio || 1;
   const w = Math.round(canvas.clientWidth * ratio);
-  const h = Math.round(Number(canvas.getAttribute("height")) * ratio);
+  const h = Math.round(cssHeight * ratio);
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
-    canvas.style.height = `${canvas.getAttribute("height")}px`;
+    canvas.style.height = `${cssHeight}px`;
   }
   return [canvas.getContext("2d"), w, h, ratio];
 }
@@ -258,7 +333,11 @@ function fit(canvas) {
 function draw() {
   if (performance.now() > startleUntil) $("startle").classList.remove("on");
   else $("startle").classList.add("on");
+  const per = cpu.frames ? cpu.us / cpu.frames : 0;
   $("mem").textContent = `ear ≈ 6 KB (64 ms raw + 1 s features) · page history ${frames.length} frames`;
+  $("cpu").textContent = cpu.frames
+    ? `${per.toFixed(1)} µs of cpu per 32 ms frame (${((per / 32000) * 100).toFixed(3)}% of one core, this machine)`
+    : "–";
   if (frames.length) {
     const last = frames.at(-1).i;
     const x = (i, w) => ((i - (last - HISTORY + 1)) / (HISTORY - 1)) * w;

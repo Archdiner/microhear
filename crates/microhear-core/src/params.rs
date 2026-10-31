@@ -37,15 +37,21 @@ macro_rules! params {
 }
 
 params! {
+    /// 0: hear against the sentry's floor (what the duck does). 1: against the min-tracking floor,
+    /// an experiment (see `floor::MinFloor`). Ignored once the duck hands its floor over.
+    floor_min_tracker = 0.0;
     /// dB over the floor where a sound starts: the sentry's 6×, so the two agree on "a sound".
     onset_db = 15.6;
     /// dB over the floor for a startle: well past a sound, into a bang.
-    startle_db = 24.0;
+    startle_db = 30.0;
     /// dB the level must climb within 64 ms for a startle: sudden, not swelling. Tune.
-    startle_rise_db = 15.0;
-    /// Absolute dBFS under which nothing startles: above talking (≈ -29 in the scene test), under a
-    /// shout or a clap, so a voice starting in a silent room is a sound, not a fright. Tune.
-    startle_min_dbfs = -25.0;
+    startle_rise_db = 20.0;
+    /// Absolute dBFS under which nothing startles: above talking close to a laptop mic, under a
+    /// clap or a bang. Tune.
+    startle_min_dbfs = -20.0;
+    /// YIN aperiodicity a startle needs: noise-like, a clap or a bang, not a voice starting.
+    /// A voice is periodic (≈ 0 to 0.2); a clap is not (≈ 0.5+).
+    startle_min_aperiodicity = 0.35;
     /// Seconds after a startle in which another cannot fire.
     startle_refractory_s = 1.0;
     /// dB over the floor a frame needs before pitch is looked for. Under 6.02 on purpose: the
@@ -66,8 +72,10 @@ params! {
     angry_loud_db = 6.0;
     /// Absolute dBFS a voice must reach to read as angry, whoever is speaking.
     angry_min_dbfs = -30.0;
-    /// Brightness (Hz) over which a voice has the high-frequency push of hot anger. Tune.
-    angry_bright_hz = 1000.0;
+    /// Richness (brightness ÷ pitch: how many harmonics deep the energy goes) over which a voice
+    /// has the pressed, high-frequency push of hot anger. Divided by pitch so a raised, cute voice
+    /// does not read as bright. Tune.
+    angry_richness = 6.0;
     /// dB from the speaker's baseline loudness that reads as a loud / a quiet voice.
     loud_db = 6.0;
     quiet_db = -6.0;

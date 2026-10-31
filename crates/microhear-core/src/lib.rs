@@ -170,7 +170,8 @@ pub struct Event {
 
 #[derive(Debug, Clone)]
 enum Floor {
-    Mirror(floor::SentryFloor),
+    /// Both kept warm, so flipping `floor_min_tracker` mid-stream compares them on the same room.
+    Mirror(floor::SentryFloor, floor::MinFloor),
     /// Handed over by the duck's `SoundSentry`, RMS.
     External(f32),
 }
@@ -179,7 +180,7 @@ enum Floor {
 struct Voiced {
     pitch_st: f32,
     level_db: f32,
-    brightness_hz: f32,
+    richness: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -207,6 +208,8 @@ pub struct Ear {
     petting: bool,
     petting_hold: u32,
     refractory: u32,
+    /// A sudden loud rise from the frame before, waiting on this frame to say whether it is noise.
+    startle_candidate: Option<(f32, f32)>,
     above_onset: bool,
     yin: pitch::Yin,
     speaker: speaker::Speaker,
@@ -227,11 +230,12 @@ impl Ear {
             pending: Vec::with_capacity(FRAME),
             window: vec![0.0; 2 * FRAME],
             frames: 0,
-            floor: Floor::Mirror(floor::SentryFloor::default()),
+            floor: Floor::Mirror(floor::SentryFloor::default(), floor::MinFloor::default()),
             levels: [SILENCE_DB; 2],
             petting: false,
             petting_hold: 0,
             refractory: 0,
+            startle_candidate: None,
             above_onset: false,
             yin: pitch::Yin::default(),
             speaker: speaker::Speaker::default(),
@@ -288,13 +292,23 @@ impl Ear {
         let muted = self.petting || self.petting_hold > 0;
 
         let floor_rms = match &mut self.floor {
-            Floor::Mirror(f) => f.frame(10f32.powf(level / 20.0), muted),
+            Floor::Mirror(sentry, min) => {
+                let rms = 10f32.powf(level / 20.0);
+                let (s, m) = (sentry.frame(rms, muted), min.frame(rms));
+                if p.floor_min_tracker >= 0.5 { m } else { s }
+            }
             Floor::External(rms) => *rms,
         };
         let floor_db = rms_db(floor_rms);
         let over = level - floor_db;
         let rise = level - self.levels[0].min(self.levels[1]);
         self.levels = [self.levels[1], level];
+
+        // L2, L3: voice and its pitch, only where there is enough sound to have one. First, because
+        // the startle reads periodicity too: a clap is noise, a voice starting is not.
+        let brightness_hz = pitch::brightness_hz(frame, first);
+        let pitch = (over >= p.voiced_db).then(|| self.yin.estimate(&self.window));
+        let voiced = !muted && pitch.is_some_and(|x| x.aperiodicity <= p.voiced_aperiodicity);
 
         // L1, the reflex: from this frame alone.
         if !self.above_onset && over >= p.onset_db {
@@ -310,33 +324,42 @@ impl Ear {
         } else if self.above_onset && over < p.voiced_db {
             self.above_onset = false;
         }
+        // A startle is decided a frame late, on purpose. The frame a sound starts in is aperiodic
+        // whatever the sound is (the pitch window straddles silence), so the frame after says
+        // whether it is noise, a clap or a bang, or a voice that started loud. A short impulse
+        // that has already died away counts as noise.
         self.refractory = self.refractory.saturating_sub(1);
+        if let Some((cand_over, cand_rise)) = self.startle_candidate.take()
+            && !muted
+            && self.refractory == 0
+            && pitch.is_none_or(|x| x.aperiodicity >= p.startle_min_aperiodicity)
+        {
+            self.refractory = (p.startle_refractory_s * FPS).round() as u32;
+            events.push(Event {
+                index,
+                kind: EventKind::Startle {
+                    over_floor_db: cand_over,
+                    rise_db: cand_rise,
+                },
+            });
+        }
         if !muted
             && self.refractory == 0
             && level >= p.startle_min_dbfs
             && over >= p.startle_db
             && rise >= p.startle_rise_db
         {
-            self.refractory = (p.startle_refractory_s * FPS).round() as u32;
-            events.push(Event {
-                index,
-                kind: EventKind::Startle {
-                    over_floor_db: over,
-                    rise_db: rise,
-                },
-            });
+            self.startle_candidate = Some((over, rise));
         }
 
-        // L2, L3: voice and its pitch, only where there is enough sound to have one.
-        let brightness_hz = pitch::brightness_hz(frame, first);
-        let pitch = (over >= p.voiced_db).then(|| self.yin.estimate(&self.window));
-        let voiced = !muted && pitch.is_some_and(|x| x.aperiodicity <= p.voiced_aperiodicity);
-
         // L4: against this speaker.
-        let heard = voiced.then(|| Voiced {
-            pitch_st: pitch::semitones(pitch.expect("voiced has a pitch").hz),
-            level_db: level,
-            brightness_hz,
+        let heard = voiced.then(|| {
+            let hz = pitch.expect("voiced has a pitch").hz;
+            Voiced {
+                pitch_st: pitch::semitones(hz),
+                level_db: level,
+                richness: brightness_hz / hz,
+            }
         });
         if let Some(v) = heard {
             let normal = self.speaker.baseline().is_some_and(|b| {
@@ -418,7 +441,7 @@ impl Ear {
             spread_st: spread,
             rel_loud_db: level - b.level_db,
             level_db: level,
-            brightness_hz: mean(|v| v.brightness_hz),
+            richness: mean(|v| v.richness),
         })
     }
 
@@ -612,9 +635,9 @@ mod tests {
         assert_eq!(whole, (frames, events));
     }
 
-    /// The reflex fires on the frame the clap lands in, not after it.
+    /// The reflex fires one frame after the clap lands: the frame it needs to know it is noise.
     #[test]
-    fn a_clap_startles_on_its_own_frame() {
+    fn a_clap_startles_one_frame_after_it_lands() {
         let mut signal = noise(0.001, seconds(3.0), 1);
         mix(&mut signal, 2.0, &clap(0.8, 2000));
         let (_, events) = hear(&signal);
@@ -622,9 +645,9 @@ mod tests {
             .iter()
             .filter(|e| matches!(e.kind, EventKind::Startle { .. }))
             .collect();
-        // 2.0 s is sample 32000, inside frame 62 (31744..32256).
+        // 2.0 s is sample 32000, inside frame 62 (31744..32256); confirmed on 63.
         assert_eq!(startles.len(), 1, "{events:?}");
-        assert_eq!(startles[0].index, 62);
+        assert_eq!(startles[0].index, 63);
         assert!(
             events
                 .iter()
@@ -677,8 +700,8 @@ mod tests {
             .filter(|e| matches!(e.kind, EventKind::Startle { .. }))
             .map(|e| e.index)
             .collect();
-        // 3.8 s is sample 60800, inside frame 118.
-        assert_eq!(startles, [118]);
+        // 3.8 s is sample 60800, inside frame 118; confirmed on 119.
+        assert_eq!(startles, [119]);
     }
 
     /// The scene every later change is checked against: event timings, frozen. A behaviour change
@@ -712,9 +735,9 @@ mod tests {
         let timeline: Vec<String> = events.iter().map(describe).collect();
         // Frame n starts at n × 32 ms; the scene starts at frame 320.
         let expected = [
-            // +1.0 s clap → frame 351: the reflex, on the frame it lands in.
+            // +1.0 s clap → frame 351; the reflex confirms it is noise on the next frame.
             "351 onset",
-            "351 startle",
+            "352 startle",
             // +2.0 s calm voice at the speaker's own pitch → frame 382; sure of it 3 frames on.
             "382 onset",
             "385 utterance start 383",
@@ -726,9 +749,8 @@ mod tests {
             "476 onset",
             "479 utterance start 477",
             "521 utterance end 477..514 cutesy +7.2 st -0.1 dB normal",
-            // +7.5 s: 12 dB louder, brighter, 2 st up. A shout that starts dead is startling too.
+            // +7.5 s: 12 dB louder, richer, 2 st up. Loud and sudden, but a voice: no startle.
             "554 onset",
-            "554 startle",
             "557 utterance start 555",
             "599 utterance end 555..592 angry +2.0 st +11.9 dB loud",
             // +10.0 s: 10 dB quieter. No onset: the shout lifted the sentry's floor ~15 dB (the

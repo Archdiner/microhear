@@ -4,9 +4,12 @@
 //!
 //! - cutesy (pet- and infant-directed speech): pitch well over the speaker's own, swinging
 //!   sing-song, at an ordinary loudness.
-//! - angry (hot anger): louder than the speaker and loud outright, with energy pushed above 1 kHz
-//!   (brightness); pitch may rise too, which is why loudness gates it and not pitch.
+//! - angry (hot anger): louder than the speaker and loud outright, with a pressed voice whose
+//!   energy reaches far up the harmonics (richness). Pitch may rise a little too.
 //! - calm: neither.
+//!
+//! Cute speech can be loud, so loudness alone does not veto it: a big sing-song pitch rise is
+//! what cute is, and that shape vetoes anger rather than the other way round.
 //!
 //! Each cue is a soft step around its threshold so the scores slide rather than flip, which is what
 //! makes the thresholds tunable by ear on the page.
@@ -56,7 +59,7 @@ pub struct Window {
     pub spread_st: f32,
     pub rel_loud_db: f32,
     pub level_db: f32,
-    pub brightness_hz: f32,
+    pub richness: f32,
 }
 
 fn step(x: f32, threshold: f32, width: f32) -> f32 {
@@ -66,12 +69,13 @@ fn step(x: f32, threshold: f32, width: f32) -> f32 {
 pub fn score(w: &Window, p: &Params) -> ToneScores {
     let raised = step(w.rel_pitch_st, p.cute_pitch_st, 1.0);
     let singsong = step(w.spread_st, p.cute_spread_st, 0.75);
+    let cute_shape = raised * (0.4 + 0.6 * singsong);
     let shouting =
         step(w.rel_loud_db, p.angry_loud_db, 2.0) * step(w.level_db, p.angry_min_dbfs, 2.0);
-    let bright = step(w.brightness_hz, p.angry_bright_hz, 150.0);
+    let pressed = step(w.richness, p.angry_richness, 0.75);
 
-    let angry = shouting * (0.4 + 0.6 * bright);
-    let cutesy = raised * (0.4 + 0.6 * singsong) * (1.0 - shouting);
+    let angry = shouting * (0.3 + 0.7 * pressed) * (1.0 - cute_shape);
+    let cutesy = cute_shape * (1.0 - shouting * pressed);
     ToneScores {
         calm: 1.0 - angry.max(cutesy),
         cutesy,
