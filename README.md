@@ -41,6 +41,12 @@ microduck main has today, for comparison.
 
 ## downstream
 
+- **tone needs more than pitch and loudness.** today's rules hear "raised pitch" as cute and
+  "louder" as angry, so loud singing reads angry, and a duck that coos at every high-pitched
+  stream is neither practical nor maintainable. anger is texture: a clenched, stern, pressed voice,
+  which in acoustics is a flatter spectral tilt and a lower H1–H2. the open design question is the
+  representation (the "codec") the duck hears tone through, and whether rules or a deliberately
+  tiny model, trained on one person's labelled clips, reads it.
 - **persistence.** the baseline lives in memory and is gone on restart. the duck should remember its
   person's voice: worth a few bytes on disk, once there is a reason to trust what it learned.
 - **orient like a single-eared animal.** the duck has one wired mic, so no time difference between
